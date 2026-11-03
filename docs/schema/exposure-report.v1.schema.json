@@ -1,0 +1,716 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hedgehog.is/schema/exposure-report.v1.json",
+  "title": "Hedgehog exposure report",
+  "description": "Output of `hedgehog exposure --json` and of the `exposure_check` MCP tool. Answers: if this laptop were compromised, what could an attacker reach? Contains credential metadata and fingerprints only; never secret values. schema_version is bumped only for breaking changes (renamed or removed fields, changed enumerations); new optional fields may appear without a bump.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "hedgehog_version",
+    "generated_at",
+    "verified",
+    "summary",
+    "reachable",
+    "findings",
+    "blockchain",
+    "graph",
+    "notes"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "hedgehog_version": {
+      "type": "string",
+      "description": "Hedgehog CLI version that produced the report"
+    },
+    "generated_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "verified": {
+      "type": "boolean",
+      "description": "True when read-only provider verification (--verify) ran"
+    },
+    "declarations": {
+      "type": "object",
+      "description": "The infrastructure map (authority.toml) that was used",
+      "required": [
+        "path",
+        "loaded"
+      ],
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "loaded": {
+          "type": "boolean"
+        }
+      }
+    },
+    "summary": {
+      "type": "object",
+      "required": [
+        "credentials",
+        "privileged_credentials",
+        "critical_indirect_paths",
+        "reachable_signing_systems",
+        "dangerous_blockchain_authorizations",
+        "persistent_access_risks",
+        "by_severity"
+      ],
+      "properties": {
+        "credentials": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Credentials and sessions found on this machine"
+        },
+        "privileged_credentials": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "critical_indirect_paths": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Ungated multi-hop paths ending in approving a transaction or moving funds, on Critical findings"
+        },
+        "reachable_signing_systems": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "dangerous_blockchain_authorizations": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "persistent_access_risks": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Findings at Medium or above whose access survives wiping this machine"
+        },
+        "by_severity": {
+          "type": "object",
+          "required": [
+            "critical",
+            "high",
+            "medium",
+            "low"
+          ],
+          "properties": {
+            "critical": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "high": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "medium": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "low": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        }
+      }
+    },
+    "reachable": {
+      "type": "array",
+      "description": "The compromised-laptop simulation: the strongest authority reachable at each target, worst first. Nothing is exercised; this is computed from the permissions found.",
+      "items": {
+        "$ref": "#/$defs/reachablePath"
+      }
+    },
+    "findings": {
+      "type": "array",
+      "description": "One entry per credential or session, sorted worst first",
+      "items": {
+        "$ref": "#/$defs/finding"
+      }
+    },
+    "blockchain": {
+      "type": "array",
+      "description": "EIP-7702 delegation and Bitcoin PSBT or signing-policy checks",
+      "items": {
+        "$ref": "#/$defs/blockchainFinding"
+      }
+    },
+    "graph": {
+      "type": "object",
+      "description": "The permission graph. `start` is the node id of this laptop.",
+      "required": [
+        "start",
+        "nodes",
+        "edges"
+      ],
+      "properties": {
+        "start": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "nodes": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "id",
+              "kind",
+              "name",
+              "production"
+            ],
+            "properties": {
+              "id": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "kind": {
+                "$ref": "#/$defs/nodeKind"
+              },
+              "name": {
+                "type": "string"
+              },
+              "production": {
+                "type": "boolean"
+              },
+              "notes": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        "edges": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "from",
+              "to",
+              "kind",
+              "assurance"
+            ],
+            "properties": {
+              "from": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "to": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "kind": {
+                "$ref": "#/$defs/edgeKind"
+              },
+              "assurance": {
+                "$ref": "#/$defs/assurance"
+              },
+              "scope": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "evidence": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "requires_approval": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Name of the approval step that gates this edge, or null when nothing gates it"
+              }
+            }
+          }
+        }
+      }
+    },
+    "notes": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "attestation": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "description": "Verified-report stamp. Present only when the report was produced with --verify under a Hedgehog Pro or Team licence; null otherwise. Contains no secret material.",
+      "required": [
+        "holder",
+        "machine",
+        "verified_at",
+        "digest"
+      ],
+      "properties": {
+        "holder": {
+          "type": "string",
+          "description": "Licence holder (the email on the lease)"
+        },
+        "machine": {
+          "type": "string",
+          "description": "Hedgehog's machine fingerprint for the laptop that was checked"
+        },
+        "verified_at": {
+          "type": "string",
+          "format": "date-time",
+          "description": "When the verified run completed (RFC 3339, UTC)"
+        },
+        "digest": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "description": "Checksum of the report and its stamp. It detects accidental or careless edits; it is not a cryptographic signature and does not prove who produced the report. 'sha256:' followed by the hex SHA-256 of this document serialised compactly with keys sorted, with the top-level 'generated_at' member and this 'attestation.digest' member removed (holder, machine and verified_at stay in)"
+        }
+      }
+    }
+  },
+  "$defs": {
+    "severity": {
+      "type": "string",
+      "enum": [
+        "critical",
+        "high",
+        "medium",
+        "low"
+      ]
+    },
+    "assurance": {
+      "type": "string",
+      "enum": [
+        "confirmed",
+        "inferred",
+        "unknown"
+      ],
+      "description": "confirmed: the provider answered; inferred: from local configuration, naming or credential type; unknown: nothing established"
+    },
+    "capability": {
+      "type": "string",
+      "enum": [
+        "yes",
+        "no",
+        "unknown"
+      ]
+    },
+    "outcome": {
+      "type": "string",
+      "enum": [
+        "possession",
+        "reachability",
+        "read",
+        "modify",
+        "request_signature",
+        "approve_signature",
+        "move_funds"
+      ],
+      "description": "Authority ladder, weakest to strongest"
+    },
+    "persistenceKey": {
+      "type": "string",
+      "enum": [
+        "requires_endpoint",
+        "independent_credential",
+        "server_side",
+        "blockchain",
+        "unknown"
+      ]
+    },
+    "nodeKind": {
+      "type": "string",
+      "enum": [
+        "laptop",
+        "identity",
+        "credential",
+        "cloud role",
+        "CI/CD system",
+        "repository",
+        "container registry",
+        "Kubernetes cluster",
+        "workload",
+        "production service",
+        "secrets manager",
+        "signing service",
+        "wallet",
+        "financial asset",
+        "system"
+      ]
+    },
+    "edgeKind": {
+      "type": "string",
+      "enum": [
+        "CAN_REACH",
+        "CAN_AUTHENTICATE",
+        "CAN_ASSUME_ROLE",
+        "CAN_READ_SECRET",
+        "CAN_PUSH_CODE",
+        "CAN_DEPLOY",
+        "CAN_MODIFY_CONFIGURATION",
+        "CAN_CREATE_CREDENTIAL",
+        "CAN_REQUEST_SIGNATURE",
+        "CAN_APPROVE_TRANSACTION",
+        "CAN_CHANGE_SIGNING_POLICY",
+        "CAN_INSTALL_DELEGATION",
+        "CAN_TRANSFER_ASSETS"
+      ]
+    },
+    "reachablePath": {
+      "type": "object",
+      "required": [
+        "target",
+        "target_kind",
+        "target_production",
+        "outcome",
+        "outcome_label",
+        "assurance",
+        "hops",
+        "approvals_required",
+        "path"
+      ],
+      "properties": {
+        "target": {
+          "type": "string"
+        },
+        "target_kind": {
+          "$ref": "#/$defs/nodeKind"
+        },
+        "target_production": {
+          "type": "boolean"
+        },
+        "outcome": {
+          "$ref": "#/$defs/outcome"
+        },
+        "outcome_label": {
+          "type": "string"
+        },
+        "assurance": {
+          "$ref": "#/$defs/assurance"
+        },
+        "hops": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "approvals_required": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Empty when nothing gates the path"
+        },
+        "path": {
+          "type": "string",
+          "description": "Human-readable path, e.g. `this laptop \u2014holds\u2192 prod (Kubernetes context) \u2014can deploy to\u2192 payments-api`"
+        }
+      }
+    },
+    "attackPath": {
+      "type": "object",
+      "required": [
+        "description",
+        "hops",
+        "outcome",
+        "assurance",
+        "approvals_required",
+        "target",
+        "target_kind",
+        "target_production"
+      ],
+      "properties": {
+        "description": {
+          "type": "string"
+        },
+        "hops": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "outcome": {
+          "$ref": "#/$defs/outcome"
+        },
+        "outcome_label": {
+          "type": "string"
+        },
+        "assurance": {
+          "$ref": "#/$defs/assurance"
+        },
+        "approvals_required": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "target": {
+          "type": "string"
+        },
+        "target_kind": {
+          "$ref": "#/$defs/nodeKind"
+        },
+        "target_production": {
+          "type": "boolean"
+        }
+      }
+    },
+    "finding": {
+      "type": "object",
+      "required": [
+        "kind",
+        "kind_label",
+        "name",
+        "location",
+        "fingerprint",
+        "target",
+        "severity",
+        "confidence",
+        "permissions",
+        "paths",
+        "persistence",
+        "evidence",
+        "reasons",
+        "remediation"
+      ],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "description": "Credential kind identifier, e.g. AwsAccessKey, KubernetesContext, SshPrivateKey, SigningServiceApiKey"
+        },
+        "kind_label": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "location": {
+          "type": "string",
+          "description": "Where it was found: a file path (home-relative) or `env NAME`"
+        },
+        "fingerprint": {
+          "type": "string",
+          "description": "Masked public id (AKIA\u2026MPLE), SSH SHA256 fingerprint, or fnv:xxxxxxxx of the secret. Never the secret."
+        },
+        "target": {
+          "type": "string"
+        },
+        "severity": {
+          "$ref": "#/$defs/severity"
+        },
+        "confidence": {
+          "$ref": "#/$defs/assurance"
+        },
+        "identity": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "organization": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "scope": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "restrictions": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "lifetime": {
+          "type": "string"
+        },
+        "expired": {
+          "type": "boolean"
+        },
+        "permissions": {
+          "type": "object",
+          "required": [
+            "assurance"
+          ],
+          "properties": {
+            "assurance": {
+              "$ref": "#/$defs/assurance",
+              "description": "Combined assurance of the capability flags: confirmed only if every flag that is set was confirmed by a provider check of that permission. Identity confirmation alone never makes this confirmed."
+            },
+            "administrative": {
+              "$ref": "#/$defs/capability"
+            },
+            "can_create_credentials": {
+              "$ref": "#/$defs/capability"
+            },
+            "can_modify_own_permissions": {
+              "$ref": "#/$defs/capability"
+            },
+            "can_assume_role": {
+              "$ref": "#/$defs/capability"
+            },
+            "can_access_production": {
+              "$ref": "#/$defs/capability"
+            },
+            "can_modify_production": {
+              "$ref": "#/$defs/capability"
+            },
+            "can_reach_signing_infrastructure": {
+              "$ref": "#/$defs/capability"
+            },
+            "requires_mfa": {
+              "$ref": "#/$defs/capability"
+            },
+            "requires_independent_approval": {
+              "$ref": "#/$defs/capability"
+            },
+            "automated": {
+              "$ref": "#/$defs/capability"
+            },
+            "revoked": {
+              "$ref": "#/$defs/capability"
+            },
+            "identity_assurance": {
+              "$ref": "#/$defs/assurance",
+              "description": "Whether the provider authenticated the credential and returned who it belongs to. Says nothing about permissions."
+            },
+            "capability_assurance": {
+              "type": "object",
+              "description": "Assurance per capability flag. A flag is confirmed only when a provider check of that specific permission confirmed it; a policy, scope or role name gives at most inferred.",
+              "additionalProperties": {
+                "$ref": "#/$defs/assurance"
+              }
+            }
+          }
+        },
+        "accessible_systems": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "paths": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/attackPath"
+          }
+        },
+        "persistence": {
+          "type": "object",
+          "required": [
+            "key",
+            "label",
+            "survives_cleanup"
+          ],
+          "properties": {
+            "key": {
+              "$ref": "#/$defs/persistenceKey"
+            },
+            "label": {
+              "type": "string"
+            },
+            "survives_cleanup": {
+              "type": "boolean",
+              "description": "True when wiping this machine does not remove the access"
+            }
+          }
+        },
+        "evidence": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "reasons": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "compensating_controls": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "remediation": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "blockchainFinding": {
+      "type": "object",
+      "required": [
+        "wallet",
+        "chain",
+        "title",
+        "severity",
+        "confidence",
+        "persistence",
+        "dangerous",
+        "details"
+      ],
+      "properties": {
+        "wallet": {
+          "type": "string"
+        },
+        "chain": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "severity": {
+          "$ref": "#/$defs/severity"
+        },
+        "confidence": {
+          "$ref": "#/$defs/assurance"
+        },
+        "persistence": {
+          "$ref": "#/$defs/persistenceKey"
+        },
+        "dangerous": {
+          "type": "boolean"
+        },
+        "details": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "verification": {
+      "type": "object",
+      "description": "What a --verify check established for this finding, separate from assurance. Running a tool successfully never by itself means confirmation.",
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": [
+            "not_attempted",
+            "unsupported",
+            "local_config",
+            "identity_confirmed",
+            "permission_confirmed",
+            "failed",
+            "confirmed"
+          ],
+          "description": "not_attempted: no --verify; unsupported: no adapter yet; local_config: only local configuration was read, the provider was not asked; identity_confirmed: the provider authenticated the credential; permission_confirmed: the provider confirmed a specific permission; failed: the check errored or timed out; confirmed: older reports only"
+        },
+        "detail": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "status"
+      ]
+    }
+  }
+}

@@ -1,0 +1,25 @@
+[workspace]
+members = [
+    "taint_engine",
+    "hedgehog-cli",
+    "hedgehog-packs",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.4.9"
+edition = "2021"
+license = "LicenseRef-PolyForm-Noncommercial-1.0.0"
+publish = false
+
+[workspace.dependencies]
+hedgehog_taint = { path = "taint_engine" }
+hedgehog-packs = { path = "hedgehog-packs" }
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true

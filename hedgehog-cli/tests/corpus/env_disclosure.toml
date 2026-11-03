@@ -1,0 +1,154 @@
+# env_disclosure.toml — dumping the environment or named secret env vars
+# into the agent context. Category (b). The allow cases pin down the line:
+# naming a single non-secret var is fine; dumping everything is not.
+
+[[case]]
+id = "env-001"
+tool = "Bash"
+command = "env"
+expect = "block"
+why = "dumps every environment variable, secrets included"
+
+[[case]]
+id = "env-002"
+tool = "Bash"
+command = "printenv"
+expect = "block"
+why = "dumps every environment variable (printenv with no arg)"
+
+[[case]]
+id = "env-003"
+tool = "Bash"
+command = "set"
+expect = "block"
+why = "shell builtin that prints all vars and functions; category (b)"
+soft = true
+
+[[case]]
+id = "env-004"
+tool = "Bash"
+command = "echo $AWS_SECRET_ACCESS_KEY"
+expect = "block"
+why = "prints a named AWS secret; category (b)"
+
+[[case]]
+id = "env-005"
+tool = "Bash"
+command = "echo \"$OPENAI_API_KEY\""
+expect = "block"
+why = "prints a named API key (quoted); category (b)"
+
+[[case]]
+id = "env-006"
+tool = "Bash"
+command = "cat /proc/self/environ"
+expect = "block"
+why = "reads the whole environment via /proc; category (b)"
+os = "unix"
+soft = true
+
+[[case]]
+id = "env-007"
+tool = "Bash"
+command = "echo $STRIPE_SECRET_KEY"
+expect = "block"
+why = "prints a named Stripe secret"
+soft = true
+
+[[case]]
+id = "env-008"
+tool = "Bash"
+command = "echo $DATABASE_URL"
+expect = "block"
+why = "prints a connection string that usually contains a password"
+soft = true
+
+[[case]]
+id = "env-009"
+tool = "Bash"
+command = "printenv AWS_SECRET_ACCESS_KEY"
+expect = "block"
+why = "prints a named AWS secret via printenv"
+soft = true
+
+[[case]]
+id = "env-010"
+tool = "Bash"
+command = "env | sort"
+expect = "block"
+why = "still a full environment dump, merely sorted"
+soft = true
+
+[[case]]
+id = "env-011"
+tool = "Bash"
+command = "declare -p"
+expect = "block"
+why = "bash declare -p prints all variables including secrets"
+soft = true
+
+[[case]]
+id = "env-012"
+tool = "Bash"
+command = "echo $GITHUB_TOKEN"
+expect = "block"
+why = "prints a GitHub token env var"
+soft = true
+
+# ── Allowed: naming non-secret vars, or filtering to one ───────────────
+[[case]]
+id = "env-allow-001"
+tool = "Bash"
+command = "echo $PATH"
+expect = "allow"
+why = "PATH is not a secret; task says this must stay allowed"
+
+[[case]]
+id = "env-allow-002"
+tool = "Bash"
+command = "echo $HOME"
+expect = "allow"
+why = "HOME is not a secret; task says this must stay allowed"
+
+[[case]]
+id = "env-allow-003"
+tool = "Bash"
+command = "env | grep -i node_env"
+expect = "allow"
+why = "filters to one non-secret var; task says allow"
+
+[[case]]
+id = "env-allow-004"
+tool = "Bash"
+command = "printenv PATH"
+expect = "allow"
+why = "prints one non-secret var; task says allow"
+
+[[case]]
+id = "env-allow-005"
+tool = "Bash"
+command = "echo $NODE_ENV"
+expect = "allow"
+why = "non-secret var"
+
+[[case]]
+id = "env-allow-006"
+tool = "Bash"
+command = "echo $PWD"
+expect = "allow"
+why = "non-secret var"
+
+[[case]]
+id = "env-allow-007"
+tool = "Bash"
+command = "printenv LANG"
+expect = "allow"
+why = "non-secret locale var"
+
+[[case]]
+id = "env-allow-008"
+tool = "Bash"
+command = "env | grep -i proxy"
+expect = "allow"
+why = "filtering to proxy settings (non-secret) is fine"
+soft = true

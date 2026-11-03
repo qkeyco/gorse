@@ -1,0 +1,101 @@
+# Gorse Security Pack: Crypto / Blockchain
+# Detects blockchain operations that deploy or transfer value.
+# Gorse-unique patterns — not covered by DCG.
+
+[pack]
+name = "crypto"
+version = "1.0.0"
+description = "Detects blockchain operations that deploy contracts or transfer value"
+author = "Gorse"
+category = "crypto"
+
+[[rules]]
+name = "Solana deploy"
+pattern = 'solana\s+(program\s+)?deploy'
+severity = "block"
+message = "BLOCKED: This would deploy a program to Solana (costs SOL)."
+alternative = "Deploy to devnet first: 'solana program deploy --url devnet'."
+
+[[rules]]
+name = "Solana transfer"
+pattern = 'solana\s+transfer'
+severity = "block"
+message = "BLOCKED: This would transfer SOL to another wallet."
+alternative = "Test on devnet: 'solana transfer --url devnet'. Get devnet SOL with 'solana airdrop'."
+
+[[rules]]
+name = "Solana token create/mint"
+pattern = 'spl-token\s+(create-token|create-account|mint|transfer)'
+severity = "block"
+message = "BLOCKED: This would create/mint/transfer Solana tokens."
+alternative = "Use devnet: 'spl-token create-token --url devnet'."
+
+[[rules]]
+name = "Anchor deploy"
+pattern = 'anchor\s+(deploy|publish|migrate)'
+severity = "block"
+message = "BLOCKED: This would deploy an Anchor program to Solana."
+alternative = "Set cluster to devnet in Anchor.toml: '[programs.devnet]'."
+
+[[rules]]
+name = "Foundry deploy"
+pattern = 'forge\s+(create|script|deploy)\s.*--broadcast'
+severity = "block"
+message = "BLOCKED: This would deploy/broadcast a transaction to an EVM chain."
+alternative = "Remove '--broadcast' for a dry run, or use '--rpc-url' with a testnet."
+
+[[rules]]
+name = "Foundry send"
+pattern = 'cast\s+send\s'
+severity = "block"
+message = "BLOCKED: This would send a transaction on an EVM chain."
+alternative = "Use a testnet RPC: 'cast send --rpc-url https://rpc.sepolia.org'."
+
+[[rules]]
+name = "Hardhat deploy mainnet"
+pattern = 'hardhat\s+(deploy|run).*--network\s+(mainnet|polygon|arbitrum|optimism|base|avalanche|bsc)'
+severity = "block"
+message = "BLOCKED: This would deploy to a mainnet EVM chain (costs real ETH/tokens)."
+alternative = "Use a testnet: '--network sepolia' or '--network mumbai'."
+
+[[rules]]
+name = "Truffle deploy mainnet"
+pattern = 'truffle\s+(deploy|migrate).*--network\s+(mainnet|polygon|arbitrum|live|production)'
+severity = "block"
+message = "BLOCKED: This would deploy to a mainnet via Truffle."
+alternative = "Use a testnet: '--network sepolia' or '--network goerli'."
+
+[[rules]]
+name = "Blockchain send transaction RPC"
+pattern = 'eth_sendTransaction|eth_sendRawTransaction|sendTransaction|signAndSendTransaction'
+severity = "block"
+message = "BLOCKED: This would send a blockchain transaction."
+alternative = "Use a testnet RPC endpoint or eth_call for read-only simulation."
+
+[[rules]]
+name = "curl to blockchain RPC"
+pattern = 'curl\s.*-X\s*POST\s.*(mainnet\.infura\.io|eth-mainnet\.g\.alchemy\.com|rpc\.ankr\.com|mainnet-beta\.solana\.com)'
+severity = "block"
+message = "BLOCKED: This would send a request to a mainnet blockchain RPC endpoint."
+alternative = "Use a testnet endpoint (e.g., sepolia.infura.io or api.devnet.solana.com)."
+
+[[rules]]
+name = "Token launch / ICO"
+pattern = '(create-token|deploy.*token|launch.*token|mint.*token).*mainnet'
+severity = "block"
+message = "BLOCKED: This looks like a token launch on mainnet."
+alternative = "Test on devnet/testnet first before deploying to mainnet."
+
+[[rules]]
+name = "NFT mint"
+pattern = '(sugar\s+mint|candy-machine|metaplex.*deploy|nft.*mint).*mainnet'
+severity = "block"
+message = "BLOCKED: This would mint NFTs on mainnet (costs real crypto)."
+alternative = "Test on devnet first: use '--rpc devnet' or equivalent."
+
+[[rules]]
+name = "Wallet private key export"
+pattern = '(solana.*keypair|cast\s+wallet.*private|eth.*export.*key|keystore.*decrypt)'
+severity = "block"
+message = "BLOCKED: This would export wallet private keys."
+alternative = "Use a hardware wallet or view the public key only with 'solana-keygen pubkey'."

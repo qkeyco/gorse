@@ -1,0 +1,15 @@
+[package]
+name = "hedgehog-packs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "DCG-compatible TOML security packs for Gorse — spending, crypto, secrets, cloud, disclosure patterns"
+
+[dependencies]
+serde = { workspace = true }
+toml = { workspace = true }
+regex = "1"
+log = "0.4"
+
+[dev-dependencies]

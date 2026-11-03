@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<!--
+  Entitlements for Gorse Scanner (is.hedgehog.scanner), the App Store app.
+
+  App Sandbox is mandatory on the Mac App Store. The app reads only folders
+  the user picks in an open panel (user-selected read-only) and keeps those
+  grants across launches with app-scoped bookmarks. There is no network
+  entitlement, so the app cannot send anything anywhere.
+
+  bundle-scanner.sh removes the two identifier keys for ad-hoc development
+  builds and keeps them for Apple Distribution builds, where App Store
+  Connect requires them.
+
+  Keep this comment free of double hyphens: XML forbids them inside a comment
+  and the entitlements parser then rejects the file at codesign time.
+-->
+<dict>
+    <key>com.apple.security.app-sandbox</key>
+    <true/>
+    <key>com.apple.security.files.user-selected.read-only</key>
+    <true/>
+    <key>com.apple.security.files.bookmarks.app-scope</key>
+    <true/>
+    <key>com.apple.application-identifier</key>
+    <string>4H5SCV7U38.is.hedgehog.scanner</string>
+    <key>com.apple.developer.team-identifier</key>
+    <string>4H5SCV7U38</string>
+</dict>
+</plist>

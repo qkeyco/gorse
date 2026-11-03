@@ -1,0 +1,128 @@
+# Gorse Security Pack: Cloud Resource Creation
+# Detects cloud resource creation that costs money.
+
+[pack]
+name = "cloud"
+version = "1.0.0"
+description = "Detects cloud resource creation that incurs billing"
+author = "Gorse"
+category = "cloud"
+
+[[rules]]
+name = "AWS EC2 instance launch"
+pattern = 'aws\s+ec2\s+run-instances'
+severity = "block"
+message = "BLOCKED: This would launch an AWS EC2 instance (billed hourly)."
+alternative = "Use '--dry-run' flag first to validate the request without launching."
+
+[[rules]]
+name = "AWS RDS create"
+pattern = 'aws\s+rds\s+create-db-(instance|cluster)'
+severity = "block"
+message = "BLOCKED: This would create an AWS RDS database (billed hourly)."
+alternative = "Use '--dry-run' or create a db.t3.micro instance for minimal cost testing."
+
+[[rules]]
+name = "AWS EKS/ECS cluster"
+pattern = 'aws\s+(eks\s+create-cluster|ecs\s+create-(cluster|service))'
+severity = "block"
+message = "BLOCKED: This would create a Kubernetes/ECS cluster on AWS."
+alternative = "Use 'eksctl' with '--dry-run' or test with a single-node cluster."
+
+[[rules]]
+name = "AWS Lambda create"
+pattern = 'aws\s+lambda\s+create-function'
+severity = "block"
+message = "BLOCKED: Creating Lambda functions can incur costs at scale."
+alternative = "Test locally with 'sam local invoke' or use the AWS free tier (1M requests/month)."
+
+[[rules]]
+name = "AWS resource creation (generic)"
+pattern = 'aws\s+\w+\s+create-(domain|endpoint|load-balancer|nat-gateway|vpn)'
+severity = "block"
+message = "BLOCKED: This would create a billable AWS resource."
+alternative = "Review pricing at aws.amazon.com/pricing/ before creating the resource."
+
+[[rules]]
+name = "GCP compute instance"
+pattern = 'gcloud\s+compute\s+instances\s+create'
+severity = "block"
+message = "BLOCKED: This would create a GCP Compute Engine instance."
+alternative = "Use 'gcloud compute instances create --no-boot-disk-auto-delete' with f1-micro for testing."
+
+[[rules]]
+name = "GCP SQL instance"
+pattern = 'gcloud\s+sql\s+instances\s+create'
+severity = "block"
+message = "BLOCKED: This would create a GCP Cloud SQL database."
+alternative = "Use '--tier db-f1-micro' for minimal cost testing."
+
+[[rules]]
+name = "GCP GKE cluster"
+pattern = 'gcloud\s+container\s+clusters\s+create'
+severity = "block"
+message = "BLOCKED: This would create a GCP Kubernetes cluster."
+alternative = "Use '--num-nodes 1 --machine-type e2-micro' for minimal cost testing."
+
+[[rules]]
+name = "GCP App Engine deploy"
+pattern = 'gcloud\s+app\s+deploy'
+severity = "block"
+message = "BLOCKED: This would deploy to GCP App Engine (billed per instance)."
+alternative = "Use 'gcloud app deploy --no-promote' to deploy without routing traffic."
+
+[[rules]]
+name = "Azure VM create"
+pattern = 'az\s+vm\s+create'
+severity = "block"
+message = "BLOCKED: This would create an Azure virtual machine."
+alternative = "Use '--size Standard_B1s' for the smallest/cheapest VM size."
+
+[[rules]]
+name = "Azure SQL create"
+pattern = 'az\s+sql\s+(server|db)\s+create'
+severity = "block"
+message = "BLOCKED: This would create an Azure SQL database."
+alternative = "Use '--compute-model Serverless' with auto-pause for cost control."
+
+[[rules]]
+name = "Azure AKS create"
+pattern = 'az\s+aks\s+create'
+severity = "block"
+message = "BLOCKED: This would create an Azure Kubernetes cluster."
+alternative = "Use '--node-count 1 --node-vm-size Standard_B2s' for minimal cost."
+
+[[rules]]
+name = "DigitalOcean droplet create"
+pattern = 'doctl\s+compute\s+droplet\s+create'
+severity = "block"
+message = "BLOCKED: This would create a DigitalOcean Droplet (billed hourly)."
+alternative = "Use '--size s-1vcpu-1gb' for the cheapest droplet size."
+
+[[rules]]
+name = "DigitalOcean database create"
+pattern = 'doctl\s+databases?\s+create'
+severity = "block"
+message = "BLOCKED: This would create a DigitalOcean managed database."
+alternative = "Use '--size db-s-1vcpu-1gb' for the smallest database size."
+
+[[rules]]
+name = "Terraform apply"
+pattern = 'terraform\s+apply(\s|$|[\x22\x27\x60;&|)])'
+severity = "block"
+message = "BLOCKED: terraform apply creates real cloud resources that cost money."
+alternative = "Run 'terraform plan' first to review what will be created."
+
+[[rules]]
+name = "Pulumi up"
+pattern = 'pulumi\s+up(\s|$|[\x22\x27\x60;&|)])'
+severity = "block"
+message = "BLOCKED: pulumi up creates real cloud resources that cost money."
+alternative = "Run 'pulumi preview' first to review what will be created."
+
+[[rules]]
+name = "kubectl apply to production"
+pattern = 'kubectl\s+apply\s.*--context.*(prod|production)'
+severity = "block"
+message = "BLOCKED: This would deploy to a production Kubernetes cluster."
+alternative = "Use '--dry-run=client' to validate the manifest without applying."

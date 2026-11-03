@@ -1,0 +1,65 @@
+# Gorse Security Pack: Subscriptions
+# Detects subscription/service signups that cost money.
+
+[pack]
+name = "subscriptions"
+version = "1.0.0"
+description = "Detects subscription/service signups that cost money"
+author = "Gorse"
+category = "subscription"
+
+[[rules]]
+name = "Heroku paid addon"
+pattern = 'heroku\s+addons:create\s'
+severity = "block"
+message = "BLOCKED: Heroku addons can incur monthly charges."
+alternative = "Check addon pricing first: 'heroku addons:plans <addon-name>'."
+
+[[rules]]
+name = "Heroku dyno scale up"
+pattern = 'heroku\s+ps:scale\s.*(standard|performance|private)'
+severity = "block"
+message = "BLOCKED: Scaling to paid Heroku dynos costs money."
+alternative = "Use 'heroku ps:scale web=1:free' to stay on the free tier."
+
+[[rules]]
+name = "Heroku paid plan"
+pattern = 'heroku\s+(apps:create|pipelines:promote).*--(tier|plan)\s'
+severity = "block"
+message = "BLOCKED: This would create a paid Heroku resource."
+alternative = "Omit the --tier/--plan flag to use the free tier."
+
+[[rules]]
+name = "Vercel Pro features"
+pattern = 'vercel\s+.*--(scope|team)\s'
+severity = "block"
+message = "BLOCKED: Team/scope operations on Vercel may require a paid plan."
+alternative = "Deploy to your personal account first: 'vercel' without --scope/--team."
+
+[[rules]]
+name = "Netlify paid features"
+pattern = 'netlify\s+.*addons:create'
+severity = "block"
+message = "BLOCKED: Netlify addons can incur charges."
+alternative = "Check addon pricing at netlify.com/pricing before enabling."
+
+[[rules]]
+name = "GitHub Copilot subscription"
+pattern = 'gh\s+copilot\s+.*subscribe|gh\s+extension\s+.*purchase'
+severity = "block"
+message = "BLOCKED: This would subscribe to a paid GitHub service."
+alternative = "Review pricing at github.com/features/copilot before subscribing."
+
+[[rules]]
+name = "Subscription API call"
+pattern = 'curl\s.*-X\s*POST\s.*(/subscribe|/subscription|/billing/plan|/upgrade|/activate.*plan)'
+severity = "block"
+message = "BLOCKED: This looks like a subscription/upgrade API call that could cost money."
+alternative = "Review the service's pricing page and use a staging environment for testing."
+
+[[rules]]
+name = "Marketplace purchase"
+pattern = '(brew\s+.*cask\s+.*purchase|mas\s+purchase|snap\s+buy)'
+severity = "block"
+message = "BLOCKED: This would purchase an app."
+alternative = "Check the app store listing and pricing before purchasing."

@@ -1,0 +1,12 @@
+Copyright (c) 2026 QKey Co.
+
+The source in this directory is licensed under the PolyForm Noncommercial
+License 1.0.0 in the LICENSE file at the root of this repository. See
+NOTICE.md for what that allows and how to obtain a commercial licence.
+
+The rule data derived from the Destructive Command Guard project stays under
+its own MIT licence and is attributed in LICENSE-THIRD-PARTY.
+
+The official Gorse binaries are licensed separately under EULA.txt.
+
+Licensing enquiries: support@gorse.is

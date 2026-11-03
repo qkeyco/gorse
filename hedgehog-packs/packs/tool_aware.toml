@@ -1,0 +1,51 @@
+# Gorse Security Pack: Tool-Aware Rules
+# Rules for non-Bash tool calls (Write, Edit, WebFetch).
+# The Rust CLI hook handler routes these separately using context/path_pattern/content_pattern fields.
+
+[pack]
+name = "tool_aware"
+version = "1.0.0"
+description = "Rules for file write, file edit, and web tool calls"
+author = "Gorse"
+category = "tool_aware"
+
+[[rules]]
+name = "Terraform config write with resources"
+context = "write"
+path_pattern = 'terraform.*\.tf$'
+content_pattern = '(resource\s|instance_type|machine_type|sku)'
+severity = "block"
+message = "BLOCKED: Writing Terraform configs that create cloud resources costs money."
+alternative = "Write the config without resource blocks, or add 'count = 0' to disable resources."
+
+[[rules]]
+name = "System config edit"
+context = "edit"
+path_pattern = '^/etc/'
+severity = "block"
+message = "BLOCKED: Editing system config files could break your machine."
+alternative = "Copy the file first ('cp /etc/file /etc/file.bak'), then edit manually."
+
+[[rules]]
+name = "Sudoers edit"
+context = "edit"
+path_pattern = 'sudoers'
+severity = "block"
+message = "BLOCKED: Editing sudoers could lock you out of your machine."
+alternative = "Use 'visudo' which validates syntax before saving."
+
+[[rules]]
+name = "Stripe dashboard access"
+context = "web"
+path_pattern = 'stripe\.com.*/dashboard'
+severity = "warn"
+message = "WARNING: Accessing Stripe dashboard could lead to payment operations."
+alternative = "Use 'stripe' CLI with test mode keys instead of the live dashboard."
+
+[[rules]]
+name = "WebFetch URL carrying a live-looking secret"
+context = "web"
+path_pattern = '(sk_live_[0-9A-Za-z]{8,}|sk_test_[0-9A-Za-z]{8,}|rk_live_[0-9A-Za-z]{8,}|AKIA[0-9A-Z]{16}|ASIA[0-9A-Z]{16}|ghp_[0-9A-Za-z]{20,}|gho_[0-9A-Za-z]{20,}|ghu_[0-9A-Za-z]{20,}|github_pat_[0-9A-Za-z_]{20,}|glpat-[0-9A-Za-z_-]{20}|xox[abprs]-[0-9A-Za-z-]{10,}|sk-ant-[0-9A-Za-z_-]{20,}|sk-[A-Za-z0-9]{32,}|AIza[0-9A-Za-z_-]{35}|SG\.[0-9A-Za-z_-]{20,}\.[0-9A-Za-z_-]{20,}|npm_[0-9A-Za-z]{30,}|pypi-[0-9A-Za-z_-]{40,}|hf_[0-9A-Za-z]{30,}|eyJ[0-9A-Za-z_-]{20,}\.eyJ|-----BEGIN)'
+severity = "block"
+message = "BLOCKED: This URL carries what looks like a live secret (an API key, token or private key). Fetching it would hand the secret to that server and record it in the conversation."
+alternative = "Fetch the URL without the secret, or let the user call the API from their own terminal."

@@ -1,0 +1,80 @@
+# Gorse Security Pack: Disclosure
+# Detects accidental public disclosure of patent-pending or proprietary code.
+# Gorse-unique patterns — not covered by DCG.
+
+[pack]
+name = "disclosure"
+version = "1.0.0"
+description = "Detects accidental public disclosure of proprietary code"
+author = "Gorse"
+category = "disclosure"
+
+[[rules]]
+name = "gh repo create --public"
+pattern = 'gh\s+repo\s+create\s.*--public'
+severity = "block"
+message = "BLOCKED: Creating a public repo could disclose patent-pending or proprietary code."
+alternative = "Use 'gh repo create --private' to create a private repository."
+
+[[rules]]
+name = "gh repo create (warn without visibility flag)"
+pattern = 'gh\s+repo\s+create\s+\S+'
+severity = "warn"
+message = "WARNING: Verify this repo is --private before creating. Default may be public."
+alternative = "Add '--private' explicitly: 'gh repo create <name> --private'."
+
+[[rules]]
+name = "gh repo edit --visibility public"
+pattern = 'gh\s+repo\s+edit\s.*--visibility\s+public'
+severity = "block"
+message = "BLOCKED: Changing repo visibility to public could disclose patent-pending code."
+alternative = "Keep the repo private. If you need to share, use 'gh repo invite' for specific collaborators."
+
+[[rules]]
+name = "gh repo fork"
+pattern = 'gh\s+repo\s+fork'
+severity = "block"
+message = "BLOCKED: Forking creates a public copy by default, risking patent disclosure."
+alternative = "Use 'gh repo clone' to get a local copy without creating a public fork."
+
+[[rules]]
+name = "GitHub API create public repo"
+pattern = '(api\\.github\\.com/user/repos|api\\.github\\.com/orgs/[^/]+/repos).*"private"\\s*:\\s*false'
+severity = "block"
+message = "BLOCKED: Creating a public repo via GitHub API could disclose patent-pending code."
+alternative = "Set '\"private\": true' in the API request body."
+
+[[rules]]
+name = "glab project create --public"
+pattern = 'glab\s+(project|repo)\s+create\s.*--public'
+severity = "block"
+message = "BLOCKED: Creating a public GitLab project could disclose patent-pending code."
+alternative = "Use '--private' or '--internal' visibility instead."
+
+[[rules]]
+name = "git remote add to public host"
+pattern = 'git\s+remote\s+add\s+\S+\s+https?://(github\.com|gitlab\.com|bitbucket\.org)/'
+severity = "block"
+message = "BLOCKED: Adding a remote to a public Git host risks pushing proprietary code publicly."
+alternative = "Verify the remote repo is private before adding it as a remote."
+
+[[rules]]
+name = "gh pages deploy"
+pattern = 'gh\s+api\s.*repos/.*/pages'
+severity = "block"
+message = "BLOCKED: Enabling GitHub Pages makes repo content publicly accessible."
+alternative = "Keep Pages disabled for private repos, or use a private deployment target."
+
+[[rules]]
+name = "cargo publish"
+pattern = 'cargo\s+publish(\s|$|[\x22\x27\x60;&|)])'
+severity = "block"
+message = "BLOCKED: Publishing a crate makes source code public on crates.io."
+alternative = "Use 'cargo publish --dry-run' to validate without publishing."
+
+[[rules]]
+name = "License file creation (public disclosure signal)"
+pattern = '(MIT|Apache|GPL|BSD|ISC|MPL|LGPL|AGPL|Unlicense|CC0).*LICENSE'
+severity = "block"
+message = "BLOCKED: Adding an open-source license signals intent to publish code publicly."
+alternative = "Use a proprietary license or add 'CONFIDENTIAL' markings instead."

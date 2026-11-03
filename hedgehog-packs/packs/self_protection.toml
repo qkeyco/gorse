@@ -1,0 +1,101 @@
+# Gorse Security Pack: Self-Protection
+# An agent may not switch off the guard that watches it.
+#
+# Covers the hook configuration files (Claude Code and Gemini CLI settings),
+# Gorse's own state under ~/.hedgehog/, the gorse binary (the old hedgehog
+# name is still recognised), and the gorse subcommands that remove or weaken protection. Reads of these files
+# are not blocked here (the secret_reads pack covers the sensitive ones);
+# this pack is about changing them.
+#
+# Path spellings: the protected files are matched by their distinctive tail
+# (".claude/settings.json", ".hedgehog/", "/gorse"), so "~", "$HOME",
+# "${HOME}", "/Users/<name>/", "/home/<name>/", "%USERPROFILE%" and Windows
+# "C:\Users\<name>\" spellings are all covered without listing each one.
+# "[/\\]" accepts either path separator.
+#
+# On Windows the state directory is "%APPDATA%\hedgehog" (see config_dir()
+# in hedgehog-cli/src/config.rs), not "~/.hedgehog", so wherever a rule
+# names ".hedgehog/" it also accepts the Windows spellings, case-insensitively:
+#   AppData\Roaming\hedgehog   %APPDATA%\hedgehog   $env:APPDATA\hedgehog
+#   ${env:APPDATA}\hedgehog    Roaming\hedgehog
+# with "/" or "\" (single or doubled) as the separator. The bare word
+# "hedgehog" never matches on its own: "cd hedgehog-cli" and
+# "cat hedgehog/README.md" stay allowed.
+#
+# Regex dialect: the Rust `regex` crate (no lookaround, no backreferences).
+
+[pack]
+name = "self_protection"
+version = "1.0.0"
+description = "Blocks an agent from disabling, removing or reconfiguring Gorse"
+author = "Gorse"
+category = "self_protection"
+
+# ─── Gorse's own commands ────────────────────────────────────────────────
+
+[[rules]]
+name = "gorse subcommand that removes or weakens protection"
+pattern = '\b(gorse|hedgehog)(\.exe)?\s+(uninstall|deactivate|allow|hook|install|service\s+uninstall|config\s[^|;&\n]*--init|allowlist\s+(add|remove)|dns\s+(add|remove)|project\s+init|canary\s+remove|alerts\s+(setup|heartbeat-enroll)|secrets\s+revoke)\b'
+severity = "block"
+message = "BLOCKED: This would change Gorse's own hook or configuration, or approve a blocked request. An agent may not switch off the guard that watches it, and only the user may approve a block. If you want this, run the command yourself in a terminal."
+alternative = "Run the gorse command yourself in a terminal, outside the agent."
+
+[[rules]]
+name = "Uninstall, kill or unload gorse via a package manager or service manager"
+pattern = '\b((brew|cargo|pip3?|pipx|npm|pnpm|yarn|winget|choco|scoop|apt|apt-get|dnf|yum|pacman|snap)\s+(uninstall|remove|rm|un|r|erase|purge|-R)\s[^|;&\n]*\b(gorse|hedgehog)|(pkill|killall)\s[^|;&\n]*\b(gorse|hedgehog)|launchctl\s+(unload|bootout|remove|disable|kill)\s[^|;&\n]*(gorse|hedgehog)|systemctl\s+(--user\s+)?(stop|disable|mask|kill)\s[^|;&\n]*(gorse|hedgehog)|sc(\.exe)?\s+(stop|delete)\s[^|;&\n]*(gorse|hedgehog)|Stop-(Service|Process)\s[^|;&\n]*(gorse|hedgehog))'
+severity = "block"
+message = "BLOCKED: This would uninstall or stop Gorse. An agent may not switch off the guard that watches it. If you want this, run the command yourself in a terminal."
+alternative = "Run the uninstall yourself in a terminal, outside the agent."
+
+[[rules]]
+name = "Override Gorse environment variables"
+pattern = '\b(GORSE|HEDGEHOG)_(API_ORIGIN|STATE_DIR)\s*='
+severity = "block"
+message = "BLOCKED: This would point Gorse at a different state directory or server. An agent may not reconfigure the guard that watches it. If you want this, set the variable yourself in a terminal."
+alternative = "Leave GORSE_* (and HEDGEHOG_*) variables to the user; the hook reads them from the user's own environment."
+
+# ─── The hook configuration, Gorse state and the binary ──────────────────
+#
+# Protected paths:
+#   .claude/settings.json, .claude/settings.local.json   (Claude Code, user or project level)
+#   .gemini/settings.json                                 (Gemini CLI)
+#   .hedgehog/                                            (Gorse state, config, packs, logs)
+#   /gorse, /gorse.exe, $(which gorse)                    (the binary; the old\n#   hedgehog name is still recognised)
+
+[[rules]]
+name = "Delete, move, replace or change permissions on Gorse hook config or binary"
+pattern = '''\b(rm|unlink|shred|srm|trash|mv|cp|install|ln|rsync|dd|truncate|tee|sponge|chmod|chown|chattr|chflags|xattr|attrib|icacls|takeown|del|erase|move|copy|ren|rename|rmdir|rd|Remove-Item|Move-Item|Copy-Item|Rename-Item|Set-Content|Add-Content|Clear-Content|Out-File|Set-ItemProperty|New-Item|ri|ni|sc|git\s+rm|git\s+checkout|git\s+restore)\s[^|;&\n]*(\.claude[/\\]settings(\.local)?\.json|\.gemini[/\\]settings\.json|\.hedgehog([/\\]|\s|$)|(?i:(appdata[/\\]+roaming|%appdata%|\$\{?env:appdata\}?|\broaming)[/\\]+hedgehog)([/\\]|["'\s;&|)>]|$)|([/\\](gorse|hedgehog)(\.exe)?|\$\(which\s+(gorse|hedgehog)\)|`which\s+(gorse|hedgehog)`|\$\(command\s+-v\s+(gorse|hedgehog)\))(["'\s;&|)>]|$))'''
+severity = "block"
+message = "BLOCKED: This would change Gorse's own hook or configuration. An agent may not switch off the guard that watches it. If you want this, run the command yourself in a terminal."
+alternative = "Ask the user to make the change in a terminal, outside the agent."
+
+[[rules]]
+name = "Redirect output into Gorse hook config or binary"
+pattern = '''>\s*[^\s|;&]*(\.claude[/\\]settings(\.local)?\.json|\.gemini[/\\]settings\.json|\.hedgehog[/\\]|(?i:(appdata[/\\]+roaming|%appdata%|\$\{?env:appdata\}?|\broaming)[/\\]+hedgehog)[/\\]|([/\\](gorse|hedgehog)(\.exe)?|\$\(which\s+(gorse|hedgehog)\)|`which\s+(gorse|hedgehog)`)(["'\s;&|)]|$))'''
+severity = "block"
+message = "BLOCKED: This would overwrite Gorse's own hook or configuration. An agent may not switch off the guard that watches it. If you want this, run the command yourself in a terminal."
+alternative = "Ask the user to make the change in a terminal, outside the agent."
+
+[[rules]]
+name = "Edit Gorse hook config in place with sed, perl or an interpreter one-liner"
+pattern = '\b(sed\s+-[a-zA-Z]*i|perl\s+-[a-zA-Z]*i|python[0-9.]*\s+-c|node\s+-[ep]|ruby\s+-e|php\s+-r|jq\s[^|;&\n]*>|yq\s+(-i|--inplace|e\s+-i)|json\s+-I)\b[^|;&\n]*(\.claude[/\\]settings(\.local)?\.json|\.gemini[/\\]settings\.json|\.hedgehog[/\\]|(?i:(appdata[/\\]+roaming|%appdata%|\$\{?env:appdata\}?|\broaming)[/\\]+hedgehog)[/\\])|\b(open|expanduser|readFileSync|writeFileSync|writeFile|unlinkSync|unlink|remove|rename|File\.(read|write|open|delete)|Path)\s*\(\s*[^)\n]*(\.claude[/\\]settings(\.local)?\.json|\.gemini[/\\]settings\.json|\.hedgehog[/\\]|(?i:(appdata[/\\]+roaming|%appdata%|\$\{?env:appdata\}?|\broaming)[/\\]+hedgehog)[/\\])|(\.claude[/\\]settings(\.local)?\.json|\.gemini[/\\]settings\.json|\.hedgehog[/\\]|(?i:(appdata[/\\]+roaming|%appdata%|\$\{?env:appdata\}?|\broaming)[/\\]+hedgehog)[/\\])[^\n]*\b(writeFileSync|writeFile|unlinkSync|rmSync|renameSync|json\.dump|os\.remove|os\.unlink|shutil\.|File\.write|FileUtils|write_text|\.write\()|\b(writeFileSync|writeFile|unlinkSync|rmSync|renameSync|json\.dump|os\.remove|os\.unlink|shutil\.|File\.write|FileUtils|write_text)\b[^\n]*(\.claude[/\\]settings(\.local)?\.json|\.gemini[/\\]settings\.json|\.hedgehog[/\\]|(?i:(appdata[/\\]+roaming|%appdata%|\$\{?env:appdata\}?|\broaming)[/\\]+hedgehog)[/\\])'
+severity = "block"
+message = "BLOCKED: This would edit Gorse's own hook or configuration. An agent may not switch off the guard that watches it. If you want this, run the command yourself in a terminal."
+alternative = "Ask the user to make the change in a terminal, outside the agent."
+
+[[rules]]
+name = "Change Claude Code hooks via the claude CLI"
+pattern = '\bclaude\s+config\s+(set|rm|remove|add)\s[^|;&\n]*hooks'
+severity = "block"
+message = "BLOCKED: This would change the Claude Code hooks that run Gorse. An agent may not switch off the guard that watches it. If you want this, run the command yourself in a terminal."
+alternative = "Ask the user to change hook settings themselves."
+
+# ─── Write / Edit tool ──────────────────────────────────────────────────────
+
+[[rules]]
+name = "Write or edit Gorse hook config or binary"
+context = "write|edit"
+path_pattern = '\.claude[/\\]settings(\.local)?\.json$|\.gemini[/\\]settings\.json$|(^|[/\\])\.hedgehog[/\\]|(?i:(appdata[/\\]+roaming|%appdata%|\$\{?env:appdata\}?|\broaming)[/\\]+hedgehog)([/\\]|$)|(^|[/\\])(gorse|hedgehog)(\.exe)?$'
+severity = "block"
+message = "BLOCKED: This would change Gorse's own hook or configuration. An agent may not switch off the guard that watches it. If you want this, make the change yourself in an editor."
+alternative = "Ask the user to make the change themselves."

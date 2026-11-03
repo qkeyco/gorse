@@ -1,0 +1,291 @@
+# Gorse Security Pack: Destructive Operations
+# Detects destructive file/system operations.
+# Note: DCG has 49+ packs covering many of these. This pack covers
+# the patterns Gorse shipped with originally. When DCG is bundled
+# as a dependency, overlapping rules can be disabled.
+
+[pack]
+name = "destructive"
+version = "1.0.0"
+description = "Detects destructive file/system operations"
+author = "Gorse"
+category = "destructive"
+
+[[rules]]
+name = "rm -rf on home directory"
+# Any `rm` with a recursive flag whose target is the home directory itself, in
+# every common spelling: ~, ~/, $HOME, "$HOME", ${HOME}, "${HOME}", /Users/<name>,
+# /home/<name>, %USERPROFILE%, with or without a trailing slash or /*, with
+# -rf / -fr / -r -f / --recursive --force, after sudo or env prefixes.
+pattern = '''\brm\s+(\S+\s+)*(-[a-zA-Z]*[rR][a-zA-Z]*|--recursive)\s+(\S+\s+)*["']?(~|\$HOME|\$\{HOME\}|%USERPROFILE%|/Users/[^/\s"']+|/home/[^/\s"']+)/?\*?["']?(\s|$|[;&|)`])'''
+severity = "block"
+message = "BLOCKED: This would recursively delete your home directory."
+alternative = "Delete specific files/folders by name, or use 'rm -ri' for interactive confirmation."
+
+[[rules]]
+name = "rm -rf on root"
+# Anchor on end-of-string as well as whitespace: '/' is the whole argument, so
+# unlike rules that need an operand after them, nothing follows it. Requiring
+# trailing whitespace meant a bare `rm -rf /` was not matched at all.
+# Also covers the `/*` glob form.
+pattern = 'rm\s+-[a-zA-Z]*([rR][a-zA-Z]*f|f[a-zA-Z]*[rR])[a-zA-Z]*\s+/(\*|\s|$)'
+severity = "block"
+message = "BLOCKED: This would recursively delete from the root filesystem."
+alternative = "Specify the exact directory to delete instead of '/'."
+
+[[rules]]
+name = "rm -rf on common important dirs"
+pattern = 'rm\s+-[a-zA-Z]*([rR][a-zA-Z]*f|f[a-zA-Z]*[rR])[a-zA-Z]*\s+(/Applications|/System|/Library|/usr|/var|/etc|/opt)'
+severity = "block"
+message = "BLOCKED: This would delete critical system directories."
+alternative = "Delete specific files within the directory rather than the entire directory."
+
+[[rules]]
+name = "rm -rf on SSH/AWS/config"
+pattern = '''\brm\s+(\S+\s+)*(-[a-zA-Z]*[rR][a-zA-Z]*|--recursive)\s+(\S+\s+)*["']?(~|\$HOME|\$\{HOME\}|%USERPROFILE%|/Users/[^/\s"']+|/home/[^/\s"']+)?/?\.(ssh|aws|kube|docker|gnupg|config|hedgehog)([/\\"'\s]|$)'''
+severity = "block"
+message = "BLOCKED: This would delete your SSH keys, cloud credentials, or important config."
+alternative = "Remove specific files (e.g., 'rm ~/.ssh/known_hosts') instead of the entire directory."
+
+[[rules]]
+name = "Git force push to main/master"
+pattern = 'git\s+push\s+.*--force.*\s+(main|master)\b|git\s+push\s+-f\s+.*\s+(main|master)\b'
+severity = "block"
+message = "BLOCKED: Force-pushing to main/master can destroy shared commit history."
+alternative = "Use 'git push --force-with-lease' to force push only if no one else has pushed."
+
+[[rules]]
+name = "Git reset hard"
+pattern = 'git\s+reset\s+--hard\s+origin/(main|master)'
+severity = "block"
+message = "BLOCKED: git reset --hard to origin/main discards ALL local changes."
+alternative = "Use 'git stash' to save changes first, or 'git reset --soft' to keep them staged."
+
+[[rules]]
+name = "DROP DATABASE"
+pattern = 'DROP\s+(DATABASE|SCHEMA)\s'
+severity = "block"
+message = "BLOCKED: This would drop an entire database."
+alternative = "Back up the database first with pg_dump/mysqldump, then drop if you're sure."
+
+[[rules]]
+name = "DROP TABLE (production-looking)"
+pattern = 'DROP\s+TABLE\s.*(prod|production|live|main|user|customer|payment|order|account)'
+severity = "block"
+message = "BLOCKED: This would drop a production-looking database table."
+alternative = "Rename the table first (ALTER TABLE ... RENAME TO ..._backup) to preserve data."
+
+[[rules]]
+name = "TRUNCATE TABLE"
+pattern = 'TRUNCATE\s+TABLE\s.*(prod|production|live|user|customer|payment|order|account)'
+severity = "block"
+message = "BLOCKED: This would delete all data from a production-looking table."
+alternative = "Use DELETE with a WHERE clause to remove specific rows."
+
+[[rules]]
+name = "Disk format/erase"
+pattern = '(diskutil\s+(eraseDisk|partitionDisk|apfs\s+deleteContainer)|mkfs|fdisk|dd\s+.*of=/dev/)'
+severity = "block"
+message = "BLOCKED: This would format or erase a disk."
+alternative = "Verify the target device with 'diskutil list' first, then proceed manually."
+
+[[rules]]
+name = "Kill all processes"
+pattern = '(killall\s+-9\s+|pkill\s+-9\s+-f\s+\.|kill\s+-9\s+-1)'
+severity = "block"
+message = "BLOCKED: This would kill all processes or a broad set of processes."
+alternative = "Kill specific processes by name ('kill <PID>') or use 'kill -15' for graceful shutdown."
+
+[[rules]]
+name = "Docker system prune all"
+pattern = 'docker\s+system\s+prune\s+(-a|--all)'
+severity = "block"
+message = "BLOCKED: This would remove ALL Docker images, containers, and volumes."
+alternative = "Use 'docker image prune' or 'docker container prune' to clean up selectively."
+
+[[rules]]
+name = "npm publish"
+pattern = 'npm\s+publish(\s|$|[\x22\x27\x60;&|)])'
+severity = "block"
+message = "BLOCKED: This would publish a package to npm. Publishing is irreversible for that version."
+alternative = "Use 'npm pack' to create a tarball and inspect it first, or use '--dry-run'."
+
+[[rules]]
+name = "pip/twine upload"
+pattern = '(twine\s+upload|pip\s+.*upload)'
+severity = "block"
+message = "BLOCKED: This would publish a package to PyPI."
+alternative = "Use 'twine upload --repository testpypi' to test on TestPyPI first."
+
+[[rules]]
+name = "PostgreSQL dropdb"
+pattern = 'dropdb\s+\w'
+severity = "block"
+message = "BLOCKED: dropdb would permanently delete an entire PostgreSQL database."
+alternative = "Back up with 'pg_dump <dbname> > backup.sql' before dropping."
+
+[[rules]]
+name = "MySQL/MariaDB drop database via CLI"
+pattern = 'mysqladmin\s+.*drop\s+'
+severity = "block"
+message = "BLOCKED: This would drop a MySQL/MariaDB database."
+alternative = "Back up with 'mysqldump <dbname> > backup.sql' before dropping."
+
+[[rules]]
+name = "MongoDB dropDatabase"
+pattern = '(db\.dropDatabase\s*\(|--eval\s+.*dropDatabase|mongosh?\s+.*--eval\s+.*drop)'
+severity = "block"
+message = "BLOCKED: This would drop a MongoDB database."
+alternative = "Back up with 'mongodump --db <dbname>' before dropping."
+
+[[rules]]
+name = "Redis FLUSHALL/FLUSHDB"
+pattern = 'redis-cli\s+.*\b(FLUSHALL|FLUSHDB)\b'
+severity = "block"
+message = "BLOCKED: This would delete all data in Redis."
+alternative = "Use 'redis-cli SAVE' to create a snapshot first, or delete specific keys with DEL."
+
+[[rules]]
+name = "SQLite drop via CLI"
+pattern = 'sqlite3?\s+.*DROP\s+(TABLE|DATABASE)'
+severity = "block"
+message = "BLOCKED: This would drop tables/databases in SQLite."
+alternative = "Copy the .sqlite file as a backup before dropping tables."
+
+[[rules]]
+name = "DELETE without WHERE clause"
+pattern = 'DELETE\s+FROM\s+\S+\s*;'
+severity = "block"
+message = "BLOCKED: DELETE without a WHERE clause would delete all rows in the table."
+alternative = "Add a WHERE clause to target specific rows: DELETE FROM table WHERE condition;"
+
+[[rules]]
+name = "Git clean -fd"
+pattern = 'git\s+clean\s+.*-[a-zA-Z]*f[a-zA-Z]*d|git\s+clean\s+.*-[a-zA-Z]*d[a-zA-Z]*f'
+severity = "block"
+message = "BLOCKED: git clean -fd permanently deletes all untracked files and directories."
+alternative = "Use 'git clean -nd' (dry run) first to see what would be deleted."
+
+[[rules]]
+name = "Git branch -D primary branches"
+pattern = 'git\s+branch\s+-D\s+(main|master|develop|release)'
+severity = "block"
+message = "BLOCKED: Force-deleting a primary branch can lose unmerged work."
+alternative = "Use 'git branch -d' (lowercase) which refuses to delete unmerged branches."
+
+[[rules]]
+name = "Git stash drop/clear all"
+pattern = 'git\s+stash\s+(drop\s+--all|clear)'
+severity = "block"
+message = "BLOCKED: This would permanently delete all stashed changes."
+alternative = "Use 'git stash list' to review stashes, then 'git stash drop stash@{N}' for specific ones."
+
+[[rules]]
+name = "GitHub Actions workflow deletion"
+pattern = 'gh\s+(api|workflow)\s+.*delete|gh\s+api\s+.*actions/runs.*-X\s+DELETE'
+severity = "block"
+message = "BLOCKED: This would delete GitHub Actions workflows or runs."
+alternative = "Disable the workflow with 'gh workflow disable' instead of deleting it."
+
+[[rules]]
+name = "Kubernetes delete namespace"
+pattern = 'kubectl\s+delete\s+(namespace|ns)\s+'
+severity = "block"
+message = "BLOCKED: Deleting a Kubernetes namespace destroys all resources within it."
+alternative = "Delete specific resources: 'kubectl delete deployment <name> -n <namespace>'."
+
+[[rules]]
+name = "Jenkins job deletion"
+pattern = 'curl\s+.*-X\s+DELETE.*jenkins|jenkins-cli\s+.*delete-(job|builds)'
+severity = "block"
+message = "BLOCKED: This would delete Jenkins CI/CD jobs or build history."
+alternative = "Disable the Jenkins job instead of deleting it."
+
+[[rules]]
+name = "Docker volume prune"
+pattern = 'docker\s+volume\s+prune'
+severity = "block"
+message = "BLOCKED: This would delete all unused Docker volumes and their data."
+alternative = "Use 'docker volume ls' to list volumes, then 'docker volume rm <name>' for specific ones."
+
+[[rules]]
+name = "Helm uninstall/delete"
+pattern = 'helm\s+(uninstall|delete)\s+'
+severity = "block"
+message = "BLOCKED: This would uninstall a Helm release from the Kubernetes cluster."
+alternative = "Use 'helm status <release>' to check what would be affected first."
+
+[[rules]]
+name = "Terraform destroy"
+pattern = 'terraform\s+destroy'
+severity = "block"
+message = "BLOCKED: terraform destroy will delete all managed infrastructure."
+alternative = "Use 'terraform plan -destroy' to preview what would be deleted first."
+
+# ─── Cloud resource deletion ────────────────────────────────────────────────
+# Added after the 2026-10 audit: deletion of live cloud resources, IaC
+# teardown, orphaning Kubernetes resources and SQL DROP/TRUNCATE via a
+# database CLI. Creation (billing) lives in cloud.toml.
+
+[[rules]]
+name = "AWS S3 bucket or recursive object deletion"
+pattern = 'aws\s+s3\s+rm(\s[^|;&\n]*)?\s(--recursive|-r\b)|aws\s+s3\s+rb\s[^|;&\n]*--force|aws\s+s3api\s+delete-(bucket|objects)\b|aws\s+s3\s+rm\s+s3://[^/\s]+/?\s*($|[;&|])'
+severity = "block"
+message = "BLOCKED: This would delete an S3 bucket or every object under a prefix. Deleted objects are gone unless versioning is on."
+alternative = "Run 'aws s3 ls s3://bucket/prefix --recursive' to see what would go, then delete specific keys."
+
+[[rules]]
+name = "AWS resource termination or deletion"
+pattern = 'aws\s+(ec2\s+terminate-instances|rds\s+delete-db-(instance|cluster|snapshot)|dynamodb\s+delete-table|cloudformation\s+delete-stack|lambda\s+delete-function|eks\s+delete-(cluster|nodegroup)|ecs\s+delete-(cluster|service)|elasticache\s+delete-(cache-cluster|replication-group)|kms\s+schedule-key-deletion|secretsmanager\s+delete-secret|route53\s+delete-hosted-zone|cloudfront\s+delete-distribution|ecr\s+delete-repository|logs\s+delete-log-group|ec2\s+delete-(volume|snapshot|vpc|security-group|key-pair)|elbv?2?\s+delete-load-balancer|sqs\s+delete-queue|sns\s+delete-topic|cognito-idp\s+delete-user-pool|amplify\s+delete-app)'
+severity = "block"
+message = "BLOCKED: This would terminate or delete a live AWS resource (instance, database, table, stack, function or similar) and its data."
+alternative = "Stop the instance ('aws ec2 stop-instances') or take a snapshot/backup first, then delete by hand."
+
+[[rules]]
+name = "AWS IAM deletion or detachment"
+pattern = 'aws\s+iam\s+(delete|remove|detach|deactivate)-[a-z-]+'
+severity = "block"
+message = "BLOCKED: This would delete or detach an IAM user, role, policy or access key, which can lock people and services out of the account."
+alternative = "Use 'aws iam list-*' and 'aws iam get-*' to review first; have the user remove IAM objects themselves."
+
+[[rules]]
+name = "Google Cloud resource deletion"
+pattern = 'gcloud\s+((alpha|beta)\s+)?(projects|compute\s+(instances|disks|instance-groups[a-z-]*|networks|firewall-rules|addresses|snapshots|images)|sql\s+(instances|databases|backups)|container\s+clusters|storage\s+buckets|run\s+services|functions|iam\s+service-accounts|pubsub\s+(topics|subscriptions)|kms\s+keys|secrets|dns\s+managed-zones|redis\s+instances|spanner\s+instances|bigtable\s+instances|filestore\s+instances|app\s+services|artifacts\s+repositories)\s+delete\b|gcloud\s+storage\s+rm(\s[^|;&\n]*)?\s(-r\b|--recursive)|gsutil\s+(-m\s+)?rm(\s[^|;&\n]*)?\s-[a-zA-Z]*[rR][a-zA-Z]*\b|gsutil\s+(-m\s+)?rb\s|bq\s+rm\s[^|;&\n]*(-r\b|--recursive|-d\b|--dataset)'
+severity = "block"
+message = "BLOCKED: This would delete a live Google Cloud resource (project, instance, database, cluster, bucket, function or similar) and its data."
+alternative = "Use 'gcloud ... list' and 'gcloud ... describe' to review first; have the user run the delete themselves."
+
+[[rules]]
+name = "Azure resource deletion"
+pattern = 'az\s+(group|vm|vmss|aks|sql\s+(server|db|mi)|storage\s+(account|container|blob)|webapp|functionapp|keyvault|cosmosdb|postgres\s+(server|flexible-server)|mysql\s+(server|flexible-server)|network\s+(vnet|nsg|public-ip)|acr|container|disk|ad\s+(user|app|sp)|role\s+assignment|deployment\s+group)\s+delete\b|az\s+keyvault\s+(secret|key|certificate)\s+(delete|purge)'
+severity = "block"
+message = "BLOCKED: This would delete a live Azure resource. 'az group delete' removes EVERYTHING in the resource group."
+alternative = "Use 'az ... list' and 'az ... show' to review first; have the user run the delete themselves."
+
+[[rules]]
+name = "Infrastructure teardown (pulumi, terragrunt, cdk, serverless, sam, fly, heroku, netlify, railway, wrangler, vercel, supabase)"
+pattern = '\b(pulumi\s+(destroy|stack\s+rm)|terraform\s+(apply\s[^|;&\n]*-destroy|workspace\s+delete|state\s+rm)|terragrunt\s+(destroy|run-all\s+destroy)|cdk\s+destroy|(sls|serverless)\s+remove|sam\s+delete|amplify\s+(delete|env\s+remove)|fly(ctl)?\s+(apps\s+destroy|destroy|machines?\s+destroy|volumes?\s+destroy|postgres\s+destroy)|heroku\s+(apps:destroy|pg:reset|addons:destroy|releases:rollback)|netlify\s+sites:delete|railway\s+(down|delete|service\s+delete)|render\s+services\s+delete|wrangler\s+(delete|kv:namespace\s+delete|r2\s+bucket\s+delete|d1\s+delete|pages\s+project\s+delete)|vercel\s+(rm|remove|projects?\s+rm|domains\s+rm|env\s+rm|alias\s+rm|dns\s+rm)\s|supabase\s+(db\s+reset\s[^|;&\n]*--linked|projects\s+delete|functions\s+delete|branches\s+delete)|doctl\s+compute\s+droplet\s+(delete|rm)|doctl\s+(databases?|kubernetes\s+cluster|apps)\s+(delete|rm)|linode-cli\s+linodes\s+delete|hcloud\s+server\s+delete)'
+severity = "block"
+message = "BLOCKED: This would tear down deployed infrastructure, a hosted database or a live deployment. The data and the deployment are gone when it finishes."
+alternative = "Run the tool's preview/plan mode first (for example 'pulumi preview --diff'), and have the user run the teardown themselves."
+
+[[rules]]
+name = "Kubernetes mass deletion (--all, -A, cluster-scoped objects)"
+pattern = 'kubectl\s+delete(\s[^|;&\n]*)?\s(--all\b|-A\b|--all-namespaces|--force\s[^|;&\n]*--grace-period=0|--grace-period=0\s[^|;&\n]*--force)|kubectl\s+delete\s+(pv|persistentvolumes?|pvc|persistentvolumeclaims?|crd|customresourcedefinitions?|nodes?|clusterroles?|clusterrolebindings?|storageclass(es)?)\b|kubectl\s+drain\s[^|;&\n]*--delete-(local-data|emptydir-data)'
+severity = "block"
+message = "BLOCKED: This would delete every resource of a kind, or cluster-scoped storage and permissions, across the cluster."
+alternative = "Delete named resources in one namespace: 'kubectl delete deployment <name> -n <namespace>'. Use '--dry-run=client' first."
+
+[[rules]]
+name = "SQL DROP or TRUNCATE through a database CLI"
+pattern = '(?i)(\b(psql|mysql|mariadb|sqlite3?|sqlcmd|clickhouse-client|cockroach\s+sql|usql|pgcli|mycli|duckdb|mongosh?)\b[^\n]*\b(drop\s+(database|schema|table|user|role|collection)|truncate(\s+table)?)\s+[a-z_"`\x5b]|\b(drop\s+(database|schema|table|user|role)|truncate(\s+table)?)\s+[^\n|]*\|\s*(psql|mysql|mariadb|sqlite3?|sqlcmd|clickhouse-client|usql|pgcli|mycli|duckdb)\b)'
+severity = "block"
+message = "BLOCKED: This runs DROP or TRUNCATE against a database through its command-line client, permanently deleting the table, schema, database or user."
+alternative = "Back up first (pg_dump, mysqldump, '.backup' in sqlite), or rename the table instead of dropping it."
+
+[[rules]]
+name = "Docker data loss (compose down -v, rm/rmi everything, volume rm by list)"
+pattern = 'docker(-compose|\s+compose)\s+down(\s[^|;&\n]*)?\s(-v\b|--volumes|--rmi)|docker\s+(rm|rmi|volume\s+rm|container\s+rm|image\s+rm)\s[^|;&\n]*\$\(docker\s+(ps|images|volume\s+ls|container\s+ls)|docker\s+(container|image|network)\s+prune\s[^|;&\n]*(-f\b|--force)|docker\s+(rm|rmi)(\s[^|;&\n]*)?\s-[a-zA-Z]*f[a-zA-Z]*\s[^|;&\n]*\$\('
+severity = "block"
+message = "BLOCKED: This would delete Docker containers, images or volumes wholesale, including volumes holding database data."
+alternative = "Stop without deleting volumes ('docker compose down' without -v), or remove named containers/volumes one at a time."

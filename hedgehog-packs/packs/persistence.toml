@@ -1,0 +1,119 @@
+# Gorse Security Pack: Persistence
+# Blocks changes that would give an agent (or anyone who has taken it over)
+# a foothold that outlives the session: code that runs on every shell start,
+# on a schedule, at login or on every git action, and access that survives a
+# password change.
+#
+# Reads of these files are allowed ("cat ~/.zshrc", "crontab -l"); this pack
+# is about writing them. Paths are matched by their distinctive tail so "~",
+# "$HOME", "/Users/<name>/" and "/home/<name>/" spellings are all covered;
+# "[/\\]" accepts either path separator.
+#
+# Regex dialect: the Rust `regex` crate (no lookaround, no backreferences).
+
+[pack]
+name = "persistence"
+version = "1.0.0"
+description = "Blocks changes that install persistent access or code that runs on every shell start, schedule or login"
+author = "Gorse"
+category = "persistence"
+
+# ─── SSH ────────────────────────────────────────────────────────────────────
+
+[[rules]]
+name = "Modify SSH authorized_keys or ssh config"
+pattern = '''(>\s*[^\s|;&]*|\b(tee|cp|mv|install|ln|rsync|dd|truncate|shred|rm|unlink|chmod|chown|chattr|chflags|python[0-9.]*|node|ruby|sed\s+-[a-zA-Z]*i|perl\s+-[a-zA-Z]*i|Set-Content|Add-Content|Out-File|Copy-Item|Move-Item|Remove-Item)\b[^|;&\n]*)\.ssh[/\\](authorized_keys2?|config|rc)\b|\bssh-copy-id\s'''
+severity = "block"
+message = "BLOCKED: This would change SSH authorized keys or SSH client config, which can give persistent remote access to this machine or redirect connections through another host, surviving a password change."
+alternative = "Show the user the exact key or config line and ask them to add it themselves."
+
+# ─── Shell start-up files ───────────────────────────────────────────────────
+
+[[rules]]
+name = "Modify shell start-up file (.zshrc, .bashrc, .profile, fish config)"
+pattern = '''(>\s*[^\s|;&]*|\b(tee|cp|mv|install|ln|rsync|dd|truncate|shred|rm|unlink|chmod|chown|chattr|chflags|python[0-9.]*|node|ruby|sed\s+-[a-zA-Z]*i|perl\s+-[a-zA-Z]*i|Set-Content|Add-Content|Out-File|Copy-Item|Move-Item|Remove-Item)\b[^|;&\n]*)([\s/\\'"]\.(zshrc|zprofile|zshenv|zlogin|zlogout|bashrc|bash_profile|bash_login|bash_logout|profile|kshrc|cshrc|tcshrc|xprofile|xinitrc|xsessionrc)\b|fish[/\\]config\.fish\b|\.config[/\\]fish[/\\]conf\.d[/\\]|[\s/\\'"]Microsoft\.PowerShell_profile\.ps1|[\s/\\'"]profile\.ps1)'''
+severity = "block"
+message = "BLOCKED: This would change a shell start-up file. Anything added there runs on every new terminal, so it is a classic place to plant code that survives the session."
+alternative = "Show the user the exact line (for example an 'export PATH=...') and ask them to add it to their shell profile themselves."
+
+# ─── Git configuration and hooks ────────────────────────────────────────────
+
+[[rules]]
+name = "Git config that runs a program (credential helper, sshCommand, hooksPath, fsmonitor, shell alias)"
+pattern = '''\bgit\s+config\b[^|;&\n]*((credential\.[^\s=]*helper|core\.sshCommand|core\.hooksPath|core\.fsmonitor|core\.gitProxy|core\.askPass|diff\.[^\s=]*\.(command|textconv)|filter\.[^\s=]*\.(clean|smudge|process)|url\.[^\s=]*\.insteadOf|include(If)?\.[^\s=]*path)\s+\S|alias\.[A-Za-z0-9_-]+\s+["']?!)|(>\s*[^\s|;&]*|\b(tee|cp|mv|install|ln|rsync|dd|truncate|rm|unlink|python[0-9.]*|node|ruby|sed\s+-[a-zA-Z]*i|perl\s+-[a-zA-Z]*i)\b[^|;&\n]*)[\s/\\'"]\.gitconfig\b'''
+severity = "block"
+message = "BLOCKED: This git configuration runs a program on every git action or hands your credentials to one. A credential helper, sshCommand, hooksPath or shell alias is a persistent way to capture secrets or run code."
+alternative = "Show the user the git config change and ask them to apply it with 'git config' themselves."
+
+[[rules]]
+name = "Install or modify a git hook"
+pattern = '''(>\s*[^\s|;&]*|\b(tee|cp|mv|install|ln|rsync|dd|truncate|rm|unlink|chmod|chown|python[0-9.]*|node|ruby|sed\s+-[a-zA-Z]*i|perl\s+-[a-zA-Z]*i)\b[^|;&\n]*)\.git[/\\]hooks[/\\]'''
+severity = "block"
+message = "BLOCKED: This would install or change a git hook. Hooks run automatically on commit, push or checkout, so they are a way to run code on every git action without being noticed."
+alternative = "Add hooks through the project's documented tooling (husky, pre-commit) in a reviewed change, or ask the user to install the hook."
+
+# ─── Scheduled tasks and login items ────────────────────────────────────────
+
+[[rules]]
+name = "Install or replace a crontab"
+pattern = '(\|\s*crontab\b|\bcrontab\b[^|;&\n]*\s-[A-Za-z]*[er]\b|\bcrontab\s+(-u\s+\S+\s+)?-\s*($|[;&|])|\bcrontab\s+(-u\s+\S+\s+)?[^-\s|;&][^\s|;&]*\s*($|[;&|]))'
+severity = "block"
+message = "BLOCKED: This would install, edit or remove a crontab. Scheduled jobs run without anyone watching, so a crontab entry is a persistent way to run code or exfiltrate data later."
+alternative = "Use 'crontab -l' to review the current schedule, and ask the user to install new entries themselves."
+
+[[rules]]
+name = "Install a launch agent, launch daemon, systemd unit, cron file or system start-up file"
+pattern = '''(>\s*[^\s|;&]*|\b(tee|cp|mv|install|ln|rsync|dd|truncate|shred|rm|unlink|chmod|chown|chattr|chflags|python[0-9.]*|node|ruby|sed\s+-[a-zA-Z]*i|perl\s+-[a-zA-Z]*i|launchctl\s+(load|bootstrap|submit|enable|kickstart)|systemctl\s+(--user\s+)?(enable|link|edit|reenable)|defaults\s+write)\b[^|;&\n]*)(Library[/\\]Launch(Agents|Daemons)|Library[/\\]StartupItems|Library[/\\]LoginItems|loginwindow|/etc/cron|/var/spool/cron|/etc/anacron|/etc/periodic|/etc/hosts\b|/etc/sudoers|/etc/systemd|\.config[/\\]systemd[/\\]user|/etc/init\.d|/etc/rc\.local|/etc/rc[0-9S]?\.d|/etc/ld\.so\.preload|/etc/profile|/etc/bash|/etc/zsh|/etc/environment|/etc/pam\.d|/etc/paths|/etc/ssh/sshd_config|/etc/shells|CurrentVersion\\Run|schtasks\s+/create|Register-ScheduledTask|New-ScheduledTask)|\bsystemctl\s+(--user\s+)?(enable|link|reenable|edit)\s|\blaunchctl\s+(load|bootstrap|submit)\s'''
+severity = "block"
+message = "BLOCKED: This would install something that runs at login, on boot or on a schedule, or change a system file that every process trusts (hosts, sudoers, PAM, ld.so.preload). These are the standard ways to keep access to a machine after the session ends."
+alternative = "Write the service or plist to the project directory for review, and ask the user to install it themselves."
+
+[[rules]]
+name = "Create a Windows scheduled task or Run key"
+pattern = '''(\bschtasks(\.exe)?\s+/create|\bRegister-ScheduledTask\b|\bNew-ScheduledTask(Action|Trigger)?\b|\breg(\.exe)?\s+add\s[^|;&\n]*CurrentVersion\\(Run|RunOnce)|Set-ItemProperty\s[^|;&\n]*CurrentVersion\\(Run|RunOnce))'''
+severity = "block"
+message = "BLOCKED: This would create a Windows scheduled task or Run key. These run at login or on a schedule without anyone watching, which is the standard way to keep access to a machine after the session ends."
+alternative = "Describe the task to the user and ask them to create it themselves."
+
+# ─── Write / Edit tool ──────────────────────────────────────────────────────
+
+[[rules]]
+name = "Write or edit SSH authorized_keys or ssh config"
+context = "write|edit"
+path_pattern = '\.ssh[/\\](authorized_keys2?|config|rc)$'
+severity = "block"
+message = "BLOCKED: This would change SSH authorized keys or SSH client config, which can give persistent remote access to this machine or redirect connections through another host, surviving a password change."
+alternative = "Show the user the exact key or config line and ask them to add it themselves."
+
+[[rules]]
+name = "Write or edit shell start-up file"
+context = "write|edit"
+path_pattern = '(^|[/\\])\.(zshrc|zprofile|zshenv|zlogin|zlogout|bashrc|bash_profile|bash_login|bash_logout|profile|kshrc|cshrc|tcshrc|xprofile|xinitrc|xsessionrc)$|fish[/\\]config\.fish$|\.config[/\\]fish[/\\]conf\.d[/\\]|Microsoft\.PowerShell_profile\.ps1$|(^|[/\\])profile\.ps1$'
+severity = "block"
+message = "BLOCKED: This would change a shell start-up file. Anything added there runs on every new terminal, so it is a classic place to plant code that survives the session."
+alternative = "Show the user the exact line and ask them to add it to their shell profile themselves."
+
+[[rules]]
+name = "Write or edit git config to run a program or capture credentials"
+context = "write|edit"
+path_pattern = '(^|[/\\])\.gitconfig$|\.config[/\\]git[/\\]config$|\.git[/\\]config$'
+content_pattern = '(?i)(helper\s*=|sshCommand|hooksPath|fsmonitor|gitProxy|askPass|insteadOf|\[credential|\[include|textconv|smudge|clean\s*=|=\s*!)'
+severity = "block"
+message = "BLOCKED: This git configuration runs a program on every git action or hands your credentials to one. A credential helper, sshCommand, hooksPath or shell alias is a persistent way to capture secrets or run code."
+alternative = "Show the user the git config change and ask them to apply it themselves."
+
+[[rules]]
+name = "Write or edit a git hook"
+context = "write|edit"
+path_pattern = '\.git[/\\]hooks[/\\]'
+severity = "block"
+message = "BLOCKED: This would install or change a git hook. Hooks run automatically on commit, push or checkout, so they are a way to run code on every git action without being noticed."
+alternative = "Add hooks through the project's documented tooling (husky, pre-commit) in a reviewed change."
+
+[[rules]]
+name = "Write or edit a launch agent, systemd unit, cron file or system start-up file"
+context = "write|edit"
+path_pattern = 'Library[/\\]Launch(Agents|Daemons)[/\\]|Library[/\\]StartupItems[/\\]|^/etc/(cron|anacron|periodic|hosts$|sudoers|systemd|init\.d|rc\.local|rc[0-9S]?\.d|ld\.so\.preload|profile|bash|zsh|environment|pam\.d|paths|ssh[/\\]sshd_config|shells)|^/var/spool/cron|\.config[/\\]systemd[/\\]user[/\\]|^/usr/lib/systemd|^/lib/systemd'
+severity = "block"
+message = "BLOCKED: This would install something that runs at login, on boot or on a schedule, or change a system file that every process trusts (hosts, sudoers, PAM, ld.so.preload). These are the standard ways to keep access to a machine after the session ends."
+alternative = "Write the file to the project directory for review, and ask the user to install it themselves."

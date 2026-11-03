@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<!--
+  Entitlements for Gorse.app (is.hedgehog.app), the Developer ID download.
+
+  No App Sandbox: the exposure check reads credential files in the home
+  folder (~/.aws, ~/.kube, ~/.ssh, agent settings), which a sandboxed app
+  cannot see. Hardened runtime is applied at codesign time. No network
+  entitlement is needed outside the sandbox; the app itself makes no
+  connections, and the CLI only talks to gorse.is for licensing when asked.
+
+  bundle-desktop.sh removes the two identifier keys for ad-hoc builds.
+-->
+<dict>
+    <key>com.apple.application-identifier</key>
+    <string>4H5SCV7U38.is.hedgehog.app</string>
+    <key>com.apple.developer.team-identifier</key>
+    <string>4H5SCV7U38</string>
+</dict>
+</plist>

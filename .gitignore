@@ -1,0 +1,20 @@
+# Rust
+target/
+hedgehog-desktop/target/
+
+# Swift
+esf_client/.build/
+esf_client/.build-*/
+esf_client/build-desktop/
+esf_client/build-scanner/
+.swiftpm/
+DerivedData/
+
+# macOS
+.DS_Store
+
+# Local environment and secrets: never commit
+.env
+.env.*
+*.p12
+*.provisionprofile

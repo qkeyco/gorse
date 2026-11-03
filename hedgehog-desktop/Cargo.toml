@@ -1,0 +1,29 @@
+[package]
+name = "hedgehog-desktop"
+version = "0.4.9"
+edition = "2021"
+license = "LicenseRef-PolyForm-Noncommercial-1.0.0"
+description = "Gorse for Windows: the exposure check in a window, around the gorse command-line tool"
+publish = false
+
+# Deliberately outside the Cargo workspace: a GUI crate needs platform
+# windowing libraries at link time that the Linux and macOS CI runners do not
+# install, and only the Windows release job builds it.
+[workspace]
+
+[[bin]]
+name = "Gorse"
+path = "src/main.rs"
+
+[dependencies]
+eframe = { version = "0.31", default-features = false, features = ["default_fonts", "glow", "wayland", "x11"] }
+egui = "0.31"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rfd = "0.15"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true

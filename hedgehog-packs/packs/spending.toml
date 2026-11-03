@@ -1,0 +1,94 @@
+# Gorse Security Pack: Spending
+# Detects real money being spent via payment APIs.
+# Gorse-unique patterns — not covered by DCG.
+
+[pack]
+name = "spending"
+version = "1.0.0"
+description = "Detects real money being spent via payment APIs"
+author = "Gorse"
+category = "spending"
+
+[[rules]]
+name = "Stripe charge creation"
+pattern = 'stripe\s+.*charges\s+create'
+severity = "block"
+message = "BLOCKED: This would create a real Stripe charge and spend money."
+alternative = "Use test mode: 'stripe charges create --api-key sk_test_...' with a test key."
+
+[[rules]]
+name = "Stripe payment intent"
+pattern = 'stripe\s+.*payment.intents?\s+create'
+severity = "block"
+message = "BLOCKED: This would create a Stripe payment intent with real money."
+alternative = "Use test mode: pass '--api-key sk_test_...' to use Stripe's test environment."
+
+[[rules]]
+name = "Stripe subscription create"
+pattern = 'stripe\s+.*subscriptions?\s+create'
+severity = "block"
+message = "BLOCKED: This would create a paid Stripe subscription."
+alternative = "Use test mode with a test API key and test clock for subscription testing."
+
+[[rules]]
+name = "Stripe invoice pay"
+pattern = 'stripe\s+.*invoices?\s+(pay|finalize)'
+severity = "block"
+message = "BLOCKED: This would pay or finalize a Stripe invoice."
+alternative = "Use test mode with 'sk_test_...' key to test invoice workflows."
+
+[[rules]]
+name = "curl to Stripe charges API"
+pattern = 'curl\s.*api\.stripe\.com/v1/(charges|payment_intents|subscriptions|invoices)'
+severity = "block"
+message = "BLOCKED: This would make a payment request to Stripe's API."
+alternative = "Use a test API key (sk_test_...) in the Authorization header."
+
+[[rules]]
+name = "PayPal payment API"
+pattern = 'curl\s.*api\.(sandbox\.)?paypal\.com/v[12]/(payments|orders|billing)'
+severity = "block"
+message = "BLOCKED: This would make a payment through PayPal."
+alternative = "Use the sandbox API at 'api.sandbox.paypal.com' for testing."
+
+[[rules]]
+name = "Square payment API"
+pattern = 'curl\s.*connect\.squareup\.com/v2/payments'
+severity = "block"
+message = "BLOCKED: This would create a payment through Square."
+alternative = "Use Square's sandbox environment for testing payments."
+
+[[rules]]
+name = "POST to payment endpoint"
+pattern = 'curl\s.*-X\s*POST\s.*(/pay|/charge|/purchase|/checkout|/billing/subscribe)'
+severity = "block"
+message = "BLOCKED: This looks like a payment or purchase request."
+alternative = "Use a staging or test environment URL for payment testing."
+
+[[rules]]
+name = "In-app purchase API"
+pattern = 'curl\s.*(buy\.itunes\.apple\.com|androidpublisher.*purchases)'
+severity = "block"
+message = "BLOCKED: This would trigger an in-app purchase."
+alternative = "Use the sandbox endpoint 'sandbox.itunes.apple.com' for testing."
+
+[[rules]]
+name = "Twilio send SMS/call"
+pattern = '(twilio\s.*messages?:?create|curl\s.*api\.twilio\.com.*Messages)'
+severity = "block"
+message = "BLOCKED: Twilio charges per message/call. This would spend money."
+alternative = "Use Twilio test credentials or the Magic Phone Numbers for testing."
+
+[[rules]]
+name = "SendGrid send email"
+pattern = 'curl\s.*api\.sendgrid\.com/v3/mail/send'
+severity = "block"
+message = "BLOCKED: SendGrid charges per email on paid plans."
+alternative = "Use SendGrid's sandbox mode by adding 'mail_settings.sandbox_mode.enable: true'."
+
+[[rules]]
+name = "Domain registration"
+pattern = '(namecheap|godaddy|gandi|cloudflare).*register|curl\s.*(domains/register|domain.*purchase)'
+severity = "block"
+message = "BLOCKED: This would register/purchase a domain name."
+alternative = "Search for domain availability first without purchasing."

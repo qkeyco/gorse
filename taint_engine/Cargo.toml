@@ -1,0 +1,17 @@
+[package]
+name = "hedgehog_taint"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Taint tracking engine for Gorse — tracks which processes read secrets and blocks their network access"
+
+[lib]
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[dependencies]
+# Zero external deps for the core engine. Security software should not have supply chain risk.
+# Using only std library.
+
+[dev-dependencies]
+# Tests only

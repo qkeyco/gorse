@@ -1,0 +1,174 @@
+GORSE END USER LICENCE AGREEMENT
+
+Effective 2 November 2026. This version replaces the agreement dated February 2026.
+Copyright (c) 2026 QKey Co. All rights reserved.
+
+This agreement is between you and QKey Co., a Delaware corporation at
+8 The Green, Suite A, Dover, DE 19901, United States ("QKey", "we", "us").
+It covers the Gorse software: the applications, the command-line tool,
+the detection engine, the rule packs, the licensing components and the
+documentation that ship with them (the "Software").
+
+By installing, copying or running the Software you accept this agreement.
+If you do not accept it, do not install or run the Software, and delete it.
+
+The purchase of a paid tier, your account on gorse.is, renewal,
+cancellation and refunds are governed by the Terms of Service at
+https://www.gorse.is/terms, and how we handle personal data is set out in
+the Privacy Policy at https://www.gorse.is/privacy. This agreement and the
+Terms of Service are meant to say the same thing about the Software; if they
+ever differ about the licence to the Software, this agreement applies, and if
+they differ about purchases, accounts or refunds, the Terms of Service apply.
+
+
+1. LICENCE
+
+   QKey grants you a personal, non-exclusive, non-transferable, revocable
+   licence to install and run the Software on computers you own or are
+   authorised to check, for your own use or your organisation's internal
+   use, according to your tier. The Software is licensed, not sold.
+
+
+2. TIERS
+
+   Free     The exposure check, the secret scan, the report, JSON output and
+            the MCP tool, with no time limit. It is not a trial.
+   Pro      Everything in Free, plus Verify, the stamped (verified) report,
+            the full home-folder scan, scheduled checks with change alerts
+            and check history, and the removal of any free-plan limits, for
+            one computer.
+   Team     Pro for each seat, plus report upload and the company view.
+
+   Pro and Team are annual subscriptions. Current prices are published at
+   https://www.gorse.is/pricing. Paid licences are bound to a computer and
+   cannot be transferred, except through the account tools we provide.
+
+
+3. WHAT YOU MAY NOT DO
+
+   You may not:
+
+   (a) sell, rent, lease, sublicense, lend or redistribute the Software;
+   (b) copy or modify it, or make derivative works, except as the law allows
+       regardless of this agreement;
+   (c) reverse engineer, decompile or disassemble it, except where the law
+       gives you that right regardless of this agreement;
+   (d) remove or alter any copyright, licence or other notice in it;
+   (e) tamper with, bypass or disable its licence checks or signed builds;
+   (f) run it on a computer you are not authorised to check. The Software
+       reads credential files, and running it on someone else's machine
+       without permission may be unlawful where you are;
+   (g) use it to build a competing product by copying it; or
+   (h) use it to break the law or to attack or harm anyone.
+
+
+4. OWNERSHIP
+
+   The Software is proprietary and is not open source. It is protected by
+   copyright and other intellectual property laws. QKey and its licensors
+   keep every right, title and interest in it, including the Gorse name
+   and logo, the rule packs and the documentation. This agreement does not
+   grant you any right to QKey's trademarks. If you send us suggestions, we
+   may use them without obligation to you.
+
+
+5. THIRD-PARTY SOFTWARE
+
+   The Software is built with open-source components. Their notices and
+   licence texts are in the LICENSE-THIRD-PARTY file beside this one, and
+   they include the Destructive Command Guard rule set, which we credit to
+   its authors. Each component remains under its own licence; if that
+   licence conflicts with this agreement, it governs for that component
+   only. Nothing in those licences grants any right to the Software itself.
+
+   The optional TruffleHog engine is a separate program published by Truffle
+   Security Co. under the GNU Affero General Public License v3. The Software
+   downloads it from its publisher's releases only when you ask, runs it as
+   a separate process and stores its licence text beside it. It is not part
+   of the Software and is not covered by this agreement.
+
+
+6. DATA
+
+   The exposure check and the secret scan run on your computer and send
+   nothing to QKey. The Software contacts gorse.is only to check for a
+   newer version and, for a paid tier, to activate and renew the licence.
+   Verify (Pro) sends requests from your computer straight to your own
+   providers, using your own credentials, under those providers' terms.
+   Team reporting, support uploads and alerts send data only when you turn
+   them on, and never send secret values. The Privacy Policy describes each
+   of these in full.
+
+
+7. UPDATES AND CHANGES
+
+   We may release updates and may change, add or withdraw features. Updates
+   are covered by this agreement unless they come with a new one. If a
+   change removes something you have paid for, the Terms of Service say how
+   you may cancel and what is refunded.
+
+
+8. NO WARRANTY
+
+   Gorse finds and reports; it does not guarantee. No security tool
+   catches everything, and a clean report does not mean a computer is safe.
+   Verify reports what a provider answered at the time it was asked. The
+   stamped report carries a checksum that detects accidental changes; it is
+   not a cryptographic signature and does not prove who produced it.
+
+   EXCEPT AS STATED IN THIS AGREEMENT, THE SOFTWARE IS PROVIDED "AS IS" AND
+   "AS AVAILABLE", WITHOUT WARRANTIES OF ANY KIND, EXPRESS OR IMPLIED,
+   INCLUDING MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+   NON-INFRINGEMENT. Some jurisdictions do not allow some of these
+   exclusions; where you are a consumer, nothing in this section removes
+   rights that your local law says cannot be excluded.
+
+
+9. LIMITS ON LIABILITY
+
+   TO THE FULLEST EXTENT THE LAW ALLOWS, QKEY IS NOT LIABLE FOR INDIRECT,
+   INCIDENTAL, SPECIAL, CONSEQUENTIAL OR PUNITIVE DAMAGES, OR FOR LOST
+   PROFITS, REVENUE, DATA OR BUSINESS, ARISING FROM THE SOFTWARE, HOWEVER
+   CAUSED. OUR TOTAL LIABILITY FOR ALL CLAIMS RELATING TO THE SOFTWARE IN
+   ANY TWELVE-MONTH PERIOD IS LIMITED TO THE AMOUNT YOU PAID FOR IT IN THAT
+   PERIOD, OR US$100 IF YOU PAID NOTHING. These limits do not apply to
+   liability that cannot be limited by law, including liability for death
+   or personal injury caused by negligence, fraud, or a consumer's statutory
+   rights.
+
+
+10. TERM AND TERMINATION
+
+   This agreement lasts until it ends. You may end it at any time by
+   deleting the Software. It ends automatically if you break it; we may also
+   end a paid licence that has been shared, redistributed or used in breach
+   of this agreement. When it ends you must stop using the Software and
+   delete your copies, except that the free features may continue to be used
+   under this agreement after a paid licence ends. Sections 4, 5, 8, 9, 11
+   and 12 survive.
+
+
+11. EXPORT AND SANCTIONS
+
+   The Software is subject to United States export laws. You may not
+   download or use it if you are in, or are acting for, a country or person
+   subject to a US embargo or sanctions, and you must not re-export it in
+   breach of those laws.
+
+
+12. LAW AND DISPUTES
+
+   This agreement is governed by the law of the State of Delaware, United
+   States, without regard to its conflict-of-law rules, and disputes will be
+   heard in the state or federal courts located in Delaware. If you are a
+   consumer in the European Union, the United Kingdom or another place whose
+   law gives you the right to bring claims in your own courts under your own
+   consumer law, this section does not take that right away. If any part of
+   this agreement is found unenforceable, the rest still applies.
+
+
+13. CONTACT
+
+   QKey Co., 8 The Green, Suite A, Dover, DE 19901, United States
+   support@gorse.is
+   https://www.gorse.is
