@@ -292,7 +292,7 @@ The check is built to be driven by scripts, agents and catalogs.
 
 - **CLI contract.** `hedgehog exposure --json` prints one JSON document whose
   shape is described by `docs/schema/exposure-report.v1.schema.json`
-  (published at https://hedgehog.is/schema/exposure-report.v1.json). Every
+  (published at https://gorse.is/schema/exposure-report.v1.json). Every
   document carries `schema_version`; it is bumped only for breaking changes,
   and new optional fields may appear without a bump. `attestation` is one such
   field: `null` for a free run, the verified-report stamp for a Pro `--verify`

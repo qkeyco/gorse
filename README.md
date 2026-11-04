@@ -63,6 +63,14 @@ You need Rust (the version in `.github/workflows/ci.yml`).
 
     cargo test --locked -p hedgehog-cli -p hedgehog_taint
 
+Each release has a tag here (`v0.4.10` and later); check out the tag of the
+release you want to compare with the published files. The
+`dependency-inventory.json` on each release page is produced from QKey's
+build tree, whose `Cargo.lock` also lists the crates of an experimental
+kernel component that is not shipped. This repository's `Cargo.lock` is the
+same lock with only those packages removed; no package is added and no
+version differs.
+
 **Mac app** (needs Xcode 15 or later). Without `--sign` the app is ad-hoc
 signed and runs only on the Mac that built it:
 

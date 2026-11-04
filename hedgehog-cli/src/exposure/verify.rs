@@ -9,7 +9,7 @@
 //! | provider   | command                                                    | mutates? |
 //! |------------|------------------------------------------------------------|----------|
 //! | AWS        | sts get-caller-identity, iam list-attached-*-policies      | no       |
-//! | GitHub     | gh auth status (never --show-token), gh api repos/{o}/{r}  | no       |
+//! | GitHub     | gh auth status (never --show-token), gh api user, gh api repos/{o}/{r} | no |
 //! | Kubernetes | kubectl config view --minify, get namespaces, auth can-i (--list, -A) | no |
 //! | Vault      | vault token lookup                                         | no       |
 //! | Google     | gcloud auth list (local configuration only, Google not asked) | no    |
@@ -1586,6 +1586,7 @@ impl Drop for EmptyDir {
 /// The detail of a check that reached a different account from the one the
 /// saved credential records.
 const GH_OTHER_ACCOUNT: &str = "provider reported a different account than the saved credential";
+const GH_NO_PROVIDER_LOGIN: &str = "gh api user did not return the login the token belongs to";
 
 /// The detail of a saved login whose hosts.yml entry records no user, so
 /// gh's answer cannot be tied to it.
@@ -1694,7 +1695,24 @@ fn verify_github(
             return Err(GH_KEYRING_NOT_FILE.into());
         }
     }
-    let status = block.status();
+    // gh auth status checks that the token works but prints the login saved
+    // beside it, not one GitHub returned. Ask GitHub who the token belongs
+    // to and require the same login before calling the identity confirmed.
+    let login = run_bound_ok("gh", &["api", "--hostname", &host, "user"], &binding, env)
+        .ok()
+        .and_then(|out| serde_json::from_str::<serde_json::Value>(&out).ok())
+        .and_then(|v| v["login"].as_str().map(str::to_string))
+        .filter(|l| !l.is_empty())
+        .ok_or_else(|| GH_NO_PROVIDER_LOGIN.to_string())?;
+    if block
+        .account
+        .as_deref()
+        .is_some_and(|shown| !shown.eq_ignore_ascii_case(&login))
+    {
+        return Err(GH_OTHER_ACCOUNT.into());
+    }
+    let mut status = block.status();
+    status.account = Some(login);
     d.credential.evidence.push(binding.evidence.clone());
     apply_gh_auth_status(d, &status, &host);
     // Token scopes are not repository permissions, so nothing gh auth
@@ -4966,7 +4984,8 @@ esac"#,
         fake_tool(
             &dir,
             "gh",
-            r#"echo "github.com
+            r#"if [ "$1" = api ]; then echo '{"login":"alice"}'; exit 0; fi
+echo "github.com
   Logged in to github.com account alice (keyring)
   Token: gho_************************************
   Token scopes: 'repo', 'workflow'" >&2"#,
@@ -5252,13 +5271,14 @@ esac"#,
     /// A stand-in gh that answers like the real one: a token variable wins
     /// over the saved login, otherwise the user in `$GH_CONFIG_DIR/hosts.yml`.
     #[cfg(unix)]
-    const GH_ALICE_BOB: &str = r#"echo "GH_CONFIG_DIR=$GH_CONFIG_DIR" >> "$GH_LOG"
-[ -f "$GH_CONFIG_DIR/hosts.yml" ] && echo "hosts-present" >> "$GH_LOG"
+    const GH_ALICE_BOB: &str = r#"if [ "$1" = auth ]; then echo "GH_CONFIG_DIR=$GH_CONFIG_DIR" >> "$GH_LOG"
+[ -f "$GH_CONFIG_DIR/hosts.yml" ] && echo "hosts-present" >> "$GH_LOG"; fi
 if [ -n "$GH_TOKEN" ]; then acct=$GH_TOKEN; src=GH_TOKEN
 elif [ -n "$GITHUB_TOKEN" ]; then acct=$GITHUB_TOKEN; src=GITHUB_TOKEN
 elif [ -f "$GH_CONFIG_DIR/hosts.yml" ]; then acct=$(sed -n 's/^ *user: *//p' "$GH_CONFIG_DIR/hosts.yml" | head -n 1); src="$GH_CONFIG_DIR/hosts.yml"
 else echo "You are not logged into any GitHub hosts." >&2; exit 1
 fi
+if [ "$1" = api ]; then printf '{"login":"%s"}\n' "${GH_REAL_LOGIN:-$acct}"; exit 0; fi
 printf 'github.com\n  Logged in to github.com account %s (%s)\n  Token: gho_****\n  Token scopes: '"'"'repo'"'"'\n' "$acct" "$src" >&2"#;
 
     #[cfg(unix)]
@@ -5356,6 +5376,42 @@ printf 'github.com\n  Logged in to github.com account %s (%s)\n  Token: gho_****
             found[0].credential.permissions.identity.as_deref(),
             Some("carol")
         );
+        assert_ne!(
+            found[0].credential.permissions.assurance,
+            Assurance::Confirmed
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn github_identity_comes_from_github_not_the_saved_username() {
+        // hosts.yml says alice, gh auth status echoes that, but the token
+        // belongs to mallory. Only GitHub's own answer settles who it is.
+        let dir = temp_tools("gh-saved-username");
+        fake_tool(&dir, "gh", GH_ALICE_BOB);
+        let home = dir.join("home");
+        std::fs::create_dir_all(home.join(".config/gh")).unwrap();
+        std::fs::write(
+            home.join(".config/gh/hosts.yml"),
+            "github.com:\n    user: alice\n    oauth_token: gho_mallory\n",
+        )
+        .unwrap();
+        let mut env = fake_env(&dir);
+        env.insert("PATH".into(), format!("{}:/usr/bin:/bin", dir.display()));
+        env.insert("HOME".into(), home.display().to_string());
+        env.insert("GH_LOG".into(), dir.join("gh.log").display().to_string());
+        env.insert("GH_REAL_LOGIN".into(), "mallory".into());
+        let mut saved = github_fixture();
+        saved.credential.permissions.identity = Some("alice".into());
+        let mut found = vec![saved];
+        let outcome = verify_all(
+            &mut found,
+            &crate::exposure::config::Declarations::default(),
+            &env,
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(outcome.verifications[0].status, VerificationStatus::Failed);
+        assert_eq!(outcome.verifications[0].detail, GH_OTHER_ACCOUNT);
         assert_ne!(
             found[0].credential.permissions.assurance,
             Assurance::Confirmed
@@ -5654,7 +5710,7 @@ printf 'github.com\n  Logged in to github.com account %s (%s)\n  Token: gho_****
             &dir,
             "gh",
             &format!(
-                "cat '{}' >&2; exit {code}",
+                "if [ \"$1\" = api ]; then echo '{{\"login\":\"{user}\"}}'; exit 0; fi\ncat '{}' >&2; exit {code}",
                 dir.join("status.txt").display()
             ),
         );

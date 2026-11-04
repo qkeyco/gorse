@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://hedgehog.is/schema/exposure-report.v1.json",
-  "title": "Hedgehog exposure report",
-  "description": "Output of `hedgehog exposure --json` and of the `exposure_check` MCP tool. Answers: if this laptop were compromised, what could an attacker reach? Contains credential metadata and fingerprints only; never secret values. schema_version is bumped only for breaking changes (renamed or removed fields, changed enumerations); new optional fields may appear without a bump.",
+  "$id": "https://gorse.is/schema/exposure-report.v1.json",
+  "title": "Gorse exposure report",
+  "description": "Output of `gorse exposure --json` and of the `exposure_check` MCP tool. Answers: if this laptop were compromised, what could an attacker reach? Contains credential metadata and fingerprints only; never secret values. schema_version is bumped only for breaking changes (renamed or removed fields, changed enumerations); new optional fields may appear without a bump.",
   "type": "object",
   "required": [
     "schema_version",
@@ -22,7 +22,7 @@
     },
     "hedgehog_version": {
       "type": "string",
-      "description": "Hedgehog CLI version that produced the report"
+      "description": "Gorse CLI version that produced the report"
     },
     "generated_at": {
       "type": "string",
@@ -243,7 +243,7 @@
         "object",
         "null"
       ],
-      "description": "Verified-report stamp. Present only when the report was produced with --verify under a Hedgehog Pro or Team licence; null otherwise. Contains no secret material.",
+      "description": "Verified-report stamp. Present only when the report was produced with --verify under a Gorse Pro or Team licence; null otherwise. Contains no secret material.",
       "required": [
         "holder",
         "machine",
@@ -257,7 +257,7 @@
         },
         "machine": {
           "type": "string",
-          "description": "Hedgehog's machine fingerprint for the laptop that was checked"
+          "description": "Gorse's machine fingerprint for the laptop that was checked"
         },
         "verified_at": {
           "type": "string",
