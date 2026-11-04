@@ -143,15 +143,18 @@ pub fn finalize(
     if let (Some(p), Some(target)) = (pending, record) {
         if let Err(e) = crate::schedule::finish_record(p, &value, target.notify) {
             // The run is not in the history: it must not claim to be
-            // recorded. Drop `recorded_at`, `trigger` and `changes`, say
-            // why, and recompute the checksum over the document that is
-            // actually emitted.
-            report.record = None;
+            // recorded, so `recorded_at` and `trigger` go. The comparison
+            // stays: previous findings this run did not assess are still
+            // not assessed, and the run is still incomplete. Say why, and
+            // recompute the checksum over the document actually emitted.
+            if let Some(info) = report.record.as_mut() {
+                info.recorded_at.clear();
+                info.trigger.clear();
+            }
             report
                 .notes
                 .push(format!("this run could not be saved to history: {e}"));
-            restamp(report);
-            value = report::render_json(report);
+            value = unrecorded_json(report);
             error = Some(e);
         }
     } else if let Some(e) = &error {
@@ -162,6 +165,27 @@ pub fn finalize(
         value = report::render_json(report);
     }
     (value, error)
+}
+
+/// The emitted document of a run whose recording failed after the
+/// comparison was made: the report with its `changes` but without
+/// `recorded_at` and `trigger`, the checksum recomputed over exactly that.
+fn unrecorded_json(report: &mut ExposureReport) -> serde_json::Value {
+    let render = |report: &ExposureReport| {
+        let mut value = report::render_json(report);
+        if let Some(object) = value.as_object_mut() {
+            object.remove("recorded_at");
+            object.remove("trigger");
+        }
+        value
+    };
+    if report.attestation.is_some() {
+        let digest = digest_of_json(render(report));
+        if let Some(stamp) = report.attestation.as_mut() {
+            stamp.digest = digest;
+        }
+    }
+    render(report)
 }
 
 /// Recompute the checksum of an already stamped report after a late
@@ -582,14 +606,15 @@ fn trufflehog_pass(
     };
     run.detections = found.len();
 
-    // Files Gorse read itself, as absolute paths. A location string is
-    // the display path, sometimes followed by " (profile)" or similar.
+    // Files Gorse read itself, as absolute paths: the path discovery
+    // recorded, never one recovered from the display location (a file may
+    // itself be named `config (production).yaml`).
     let covered: Vec<PathBuf> = discovered
         .iter()
         .map(|d| {
-            let text = d.credential.location.as_str();
-            let text = text.split(" (").next().unwrap_or(text);
-            ctx.expand(text)
+            d.source
+                .clone()
+                .unwrap_or_else(|| ctx.expand(&d.credential.location))
         })
         .collect();
     let is_covered = |path: &Path| covered.iter().any(|c| path == c || path.starts_with(c));
@@ -674,6 +699,7 @@ fn collapse_external(
             credential: cred,
             links: Vec::new(),
             verify_key: None,
+            source: None,
         });
         counts.push(1);
     }
@@ -910,7 +936,8 @@ fn blockchain_findings(
 ) -> Vec<BlockchainFinding> {
     let mut out = Vec::new();
     for wallet in &decl.wallets {
-        match wallet.chain.as_str() {
+        // Chain names are compared case-insensitively ("Bitcoin", "ETHEREUM").
+        match wallet.chain.trim().to_ascii_lowercase().as_str() {
             "ethereum" => {
                 let Some(addr_hex) = &wallet.address else {
                     continue;
@@ -994,6 +1021,31 @@ fn blockchain_findings(
             }
             "bitcoin" => {
                 let Some(policy_cfg) = &wallet.bitcoin_policy else {
+                    // A declared PSBT is still read and parsed without a
+                    // policy: one that cannot be is lost coverage.
+                    if let Some(file) = &wallet.psbt_file {
+                        let path = ctx.expand(file);
+                        let checked = match std::fs::read_to_string(&path) {
+                            Ok(text) => psbt::parse_psbt(text.trim())
+                                .map_err(|e| format!("PSBT not parsed: {e:?}")),
+                            Err(e) => Err(format!("PSBT file unreadable: {e}")),
+                        };
+                        match checked {
+                            Ok(parsed) => notes.push(format!(
+                                "wallet {}: PSBT {file} read ({} input(s), {} output(s)); no [wallet.bitcoin_policy] is declared, so it was not evaluated against a policy",
+                                wallet.name,
+                                parsed.inputs.len(),
+                                parsed.outputs.len()
+                            )),
+                            Err(reason) => {
+                                notes.push(format!("wallet {}: {reason}", wallet.name));
+                                coverage_failures.push(CoverageFailure {
+                                    location: ctx.display(&path),
+                                    reason,
+                                });
+                            }
+                        }
+                    }
                     continue;
                 };
                 let policy = psbt::SigningPolicy {
@@ -1007,7 +1059,7 @@ fn blockchain_findings(
                     independent_verification_available: policy_cfg
                         .independent_verification_available,
                 };
-                let network = match policy_cfg.network.as_str() {
+                let network = match policy_cfg.network.trim().to_ascii_lowercase().as_str() {
                     "testnet" => psbt::Network::Testnet,
                     "signet" => psbt::Network::Signet,
                     "regtest" => psbt::Network::Regtest,
@@ -1179,6 +1231,7 @@ mod tests {
                 ),
                 links: vec![],
                 verify_key: None,
+                source: None,
             })
             .collect();
         let (graph, laptop, cred_nodes) = build_graph(&discovered, &decl);
@@ -1454,6 +1507,49 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    #[test]
+    fn a_declared_psbt_is_checked_without_a_policy_and_chain_names_ignore_case() {
+        let dir = std::env::temp_dir().join(format!(
+            "gorse-psbt-nopolicy-{}-{}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let garbage = dir.join("garbage.psbt");
+        std::fs::write(&garbage, "this is not a psbt\n").unwrap();
+        let missing = dir.join("missing.psbt");
+        for (path, reason, chain) in [
+            (&garbage, "PSBT not parsed", "bitcoin"),
+            (&missing, "PSBT file unreadable", "Bitcoin"),
+        ] {
+            let decl = Declarations::parse(&format!(
+                "[[wallet]]\nname = \"cold\"\nchain = \"{chain}\"\npsbt_file = \"{}\"\n",
+                path.display().to_string().replace('\\', "/")
+            ))
+            .unwrap();
+            let ctx = Context::from_process(&decl);
+            let mut notes = Vec::new();
+            let mut failures = Vec::new();
+            let found = blockchain_findings(&decl, &ctx, false, &mut notes, &mut failures);
+            assert_eq!(failures.len(), 1, "{chain}: {failures:?}");
+            assert!(failures[0].reason.starts_with(reason), "{failures:?}");
+            assert!(found.is_empty());
+        }
+        // With a policy, an upper-case chain name is still Bitcoin.
+        let decl = Declarations::parse(&format!(
+            "[[wallet]]\nname = \"cold\"\nchain = \"BITCOIN\"\npsbt_file = \"{}\"\n[wallet.bitcoin_policy]\nmax_fee_sats = 1000\n",
+            garbage.display().to_string().replace('\\', "/")
+        ))
+        .unwrap();
+        let ctx = Context::from_process(&decl);
+        let mut failures = Vec::new();
+        let found = blockchain_findings(&decl, &ctx, false, &mut Vec::new(), &mut failures);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].chain, "bitcoin");
+        assert_eq!(failures.len(), 1);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     #[cfg(unix)]
     #[test]
     fn a_run_the_history_could_not_store_does_not_claim_to_be_recorded() {
@@ -1482,10 +1578,11 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let error = error.expect("the history write fails");
         assert_eq!(stored, 0);
-        assert!(r.record.is_none());
-        for key in ["recorded_at", "trigger", "changes"] {
+        // Not recorded: no time or trigger. The comparison stays.
+        for key in ["recorded_at", "trigger"] {
             assert!(emitted.get(key).is_none(), "{key} left in {emitted}");
         }
+        assert!(emitted["changes"].is_object(), "{emitted}");
         let note = format!("this run could not be saved to history: {error}");
         assert!(
             emitted["notes"]
@@ -1499,6 +1596,127 @@ mod tests {
         assert_eq!(recompute(&emitted), digest);
         assert_eq!(digest_of_json(emitted.clone()), digest);
         assert_eq!(report::render_json(&r)["attestation"]["digest"], digest);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_history_write_keeps_the_unassessed_findings_and_incomplete() {
+        use std::os::unix::fs::PermissionsExt;
+        let attestor = Attestor {
+            holder: HOLDER.into(),
+            machine: MACHINE.into(),
+        };
+        let dir = std::env::temp_dir().join(format!(
+            "gorse-finalize-unassessed-{}-{}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        let target = |dir| RecordTarget {
+            exposure_dir: dir,
+            trigger: crate::schedule::Trigger::Manual,
+            notify: false,
+        };
+        let mut first = report_with(&["default"]);
+        first.finding_meta[0].source = "ssh".into();
+        let (_, error) = finalize(&mut first, Some(target(&dir)), None);
+        assert!(error.is_none(), "{error:?}");
+
+        // The comparison is made (begin_record succeeds), then the write
+        // into the read-only history fails.
+        let history = dir.join("history");
+        std::fs::set_permissions(&history, std::fs::Permissions::from_mode(0o500)).unwrap();
+        let mut second = report_with(&[]);
+        second.sources_assessed.retain(|s| s != "ssh");
+        second.sources_unavailable.push((
+            "ssh".into(),
+            "SSH agent (SSH_AUTH_SOCK): socket missing".into(),
+        ));
+        let (emitted, error) = finalize(&mut second, Some(target(&dir)), Some(&attestor));
+        std::fs::set_permissions(&history, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(error.is_some(), "the history write fails");
+        assert_eq!(emitted["incomplete"], true, "{emitted}");
+        assert_eq!(emitted["changes"]["counts"]["unassessed"], 1, "{emitted}");
+        for key in ["recorded_at", "trigger"] {
+            assert!(emitted.get(key).is_none(), "{key} left in {emitted}");
+        }
+        let digest = emitted["attestation"]["digest"].as_str().unwrap();
+        assert_eq!(recompute(&emitted), digest);
+        assert_eq!(exit_code(&second), EXIT_INCOMPLETE);
+    }
+
+    /// The checksum recipe as docs/schema/exposure-report.v1.schema.json
+    /// states it, applied by hand to a history file after
+    /// `gorse schedule accept-baseline`, and to a history file from an
+    /// older version that carries `accepted_by_user` itself.
+    #[test]
+    fn the_schema_checksum_recipe_reproduces_the_digest_after_accept_baseline() {
+        let schema_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("docs")
+            .join("schema")
+            .join("exposure-report.v1.schema.json");
+        let schema_text = std::fs::read_to_string(&schema_path)
+            .unwrap()
+            .replace("\r\n", "\n");
+        let schema: serde_json::Value = serde_json::from_str(&schema_text).unwrap();
+        let recipe = schema["properties"]["attestation"]["properties"]["digest"]["description"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
+        for member in [
+            "'generated_at'",
+            "'attestation.digest'",
+            "'accepted_by_user'",
+        ] {
+            assert!(recipe.contains(member), "{member} missing from: {recipe}");
+        }
+        // The recipe, step by step: drop those three members, serialise
+        // compactly with keys sorted, SHA-256, hex.
+        let by_schema = |doc: &serde_json::Value| {
+            let mut doc = doc.clone();
+            let object = doc.as_object_mut().unwrap();
+            object.remove("generated_at");
+            object.remove("accepted_by_user");
+            object["attestation"]
+                .as_object_mut()
+                .unwrap()
+                .remove("digest");
+            format!("sha256:{:x}", Sha256::digest(doc.to_string().as_bytes()))
+        };
+
+        let dir = std::env::temp_dir().join(format!(
+            "gorse-accept-recipe-{}-{}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        let attestor = Attestor {
+            holder: HOLDER.into(),
+            machine: MACHINE.into(),
+        };
+        let mut r = report_with(&["default"]);
+        let target = RecordTarget {
+            exposure_dir: &dir,
+            trigger: crate::schedule::Trigger::Manual,
+            notify: false,
+        };
+        let (emitted, error) = finalize(&mut r, Some(target), Some(&attestor));
+        assert!(error.is_none(), "{error:?}");
+        let digest = emitted["attestation"]["digest"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let file = crate::schedule::accept_baseline_in(&dir).unwrap();
+        let stored: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(dir.join("history").join(&file)).unwrap(),
+        )
+        .unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(by_schema(&stored), digest);
+        let mut legacy = stored.clone();
+        legacy["accepted_by_user"] = serde_json::json!(true);
+        assert_eq!(by_schema(&legacy), digest);
+        assert_eq!(digest_of_json(legacy), digest);
     }
 
     #[test]

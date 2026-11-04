@@ -154,6 +154,13 @@ pub fn log_path() -> PathBuf {
     exposure_dir().join("schedule.log")
 }
 
+/// `exposure_dir/baseline.json`: the run the user accepted as the baseline
+/// with `gorse schedule accept-baseline`. Kept apart from the run itself so
+/// a recorded (and possibly stamped) run file is never modified.
+pub fn accepted_baseline_path_in(exposure_dir: &Path) -> PathBuf {
+    exposure_dir.join("baseline.json")
+}
+
 /// Create a directory (and parents) readable by this user only.
 fn create_private_dir(path: &Path) -> Result<(), String> {
     let mut builder = std::fs::DirBuilder::new();
@@ -647,46 +654,80 @@ fn history_files_in(dir: &Path) -> Vec<PathBuf> {
 /// last complete one and a finding that briefly vanished behind a
 /// permission error is not reported as resolved and then new again.
 ///
-/// A run the user accepted with `gorse schedule accept-baseline`
-/// (`accepted_by_user: true`) is a baseline even when it is incomplete.
-pub fn baseline_file(files: &[PathBuf]) -> Option<(PathBuf, serde_json::Value)> {
+/// The run the user accepted with `gorse schedule accept-baseline` (named
+/// by `accepted`, read from `baseline.json`) is a baseline even when it is
+/// incomplete, until a newer complete run exists. A run file from an older
+/// version that carries `accepted_by_user: true` itself counts the same way.
+pub fn baseline_file(
+    files: &[PathBuf],
+    accepted: Option<&str>,
+) -> Option<(PathBuf, serde_json::Value)> {
     files.iter().find_map(|p| {
         let run = read_json(p)?;
-        (!is_incomplete(&run) || is_accepted(&run)).then(|| (p.clone(), run))
+        (!is_incomplete(&run) || is_accepted(p, &run, accepted)).then(|| (p.clone(), run))
     })
 }
 
-/// Whether the user accepted a recorded run as the baseline.
-fn is_accepted(report: &serde_json::Value) -> bool {
-    report
-        .get("accepted_by_user")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false)
+/// Whether the user accepted a recorded run as the baseline: it is the run
+/// named in `baseline.json`, or (histories from older versions) the run
+/// file itself carries `accepted_by_user: true`.
+fn is_accepted(path: &Path, report: &serde_json::Value, accepted: Option<&str>) -> bool {
+    let named = accepted.is_some_and(|name| {
+        path.file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n == name)
+    });
+    named
+        || report
+            .get("accepted_by_user")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
 }
 
-/// Mark the newest recorded run in `exposure_dir/history` as the baseline,
-/// even if it is incomplete: it gets `accepted_by_user: true`, and later
-/// runs are compared with it. Returns the run file's name.
+/// The run file name recorded in `exposure_dir/baseline.json`, if the user
+/// accepted one. Anything that is not a plain file name is ignored.
+pub fn accepted_baseline_in(exposure_dir: &Path) -> Option<String> {
+    let record = read_json(&accepted_baseline_path_in(exposure_dir))?;
+    if record.get("accepted_by_user").and_then(|v| v.as_bool()) != Some(true) {
+        return None;
+    }
+    let file = record.get("file")?.as_str()?;
+    let plain = !file.is_empty()
+        && Path::new(file).file_name().and_then(|n| n.to_str()) == Some(file)
+        && !file.contains(['/', '\\']);
+    plain.then(|| file.to_string())
+}
+
+/// Accept the newest recorded run in `exposure_dir/history` as the
+/// baseline, even if it is incomplete: later runs are compared with it
+/// until a newer complete run exists. The run file is never modified (a
+/// stamped run's checksum must still recompute); the acceptance is written
+/// to `exposure_dir/baseline.json` instead. Returns the run file's name.
 pub fn accept_baseline_in(exposure_dir: &Path) -> Result<String, String> {
     let files = history_files_in(&exposure_dir.join("history"));
     let latest = files.first().ok_or_else(|| {
         "No recorded check to accept: run `gorse exposure --record` first.".to_string()
     })?;
-    let mut run = read_json(latest).ok_or_else(|| {
-        format!(
-            "Could not read the latest recorded check ({})",
-            latest.display()
-        )
-    })?;
-    let object = run
-        .as_object_mut()
-        .ok_or_else(|| "The latest recorded check is not a report".to_string())?;
-    object.insert("accepted_by_user".into(), serde_json::Value::Bool(true));
-    write_json_atomic(latest, &run)?;
-    Ok(latest
+    read_json(latest)
+        .filter(|run| run.is_object())
+        .ok_or_else(|| {
+            format!(
+                "Could not read the latest recorded check ({})",
+                latest.display()
+            )
+        })?;
+    let file = latest
         .file_name()
-        .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_default())
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| "The latest recorded check has no usable file name".to_string())?
+        .to_string();
+    let record = serde_json::json!({
+        "file": file,
+        "accepted_at": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        "accepted_by_user": true,
+    });
+    write_json_atomic(&accepted_baseline_path_in(exposure_dir), &record)?;
+    Ok(file)
 }
 
 /// Keep the newest `keep` history files in `dir`; delete the rest.
@@ -845,7 +886,8 @@ pub fn begin_record(
 ) -> Result<PendingRecord, String> {
     let dir = exposure_dir.join("history");
     create_private_dir(&dir)?;
-    let baseline = baseline_file(&history_files_in(&dir));
+    let accepted = accepted_baseline_in(exposure_dir);
+    let baseline = baseline_file(&history_files_in(&dir), accepted.as_deref());
     let changes = diff(baseline.as_ref().map(|(_, run)| run), report);
     let now = chrono::Utc::now();
     let at = now.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
@@ -1802,7 +1844,7 @@ fn status_text(status: &serde_json::Value) -> String {
 
 // ─── History listing ─────────────────────────────────────────────────────────
 
-fn history_entry_json(path: &Path) -> Option<serde_json::Value> {
+fn history_entry_json(path: &Path, accepted: Option<&str>) -> Option<serde_json::Value> {
     let run = read_json(path)?;
     let changes = run.get("changes").cloned().unwrap_or(serde_json::json!({}));
     let c = changes
@@ -1822,7 +1864,7 @@ fn history_entry_json(path: &Path) -> Option<serde_json::Value> {
         "first_run": changes.get("first_run").and_then(|v| v.as_bool()).unwrap_or(false),
         "incomplete": is_incomplete(&run),
         "coverage_failures": coverage_failure_count(&run),
-        "accepted_by_user": is_accepted(&run),
+        "accepted_by_user": is_accepted(path, &run, accepted),
     }))
 }
 
@@ -2061,10 +2103,11 @@ fn cmd_run(json: bool) {
 }
 
 fn cmd_history(json: bool, limit: usize) {
+    let accepted = accepted_baseline_in(&exposure_dir());
     let entries: Vec<serde_json::Value> = history_files()
         .iter()
         .take(limit)
-        .filter_map(|p| history_entry_json(p))
+        .filter_map(|p| history_entry_json(p, accepted.as_deref()))
         .collect();
     if json {
         println!(
@@ -2588,16 +2631,146 @@ mod tests {
         write_json_atomic(&history.join("20260101T000000Z.json"), &complete).unwrap();
         write_json_atomic(&history.join("20260102T000000Z.json"), &incomplete).unwrap();
         let files = history_files_in(&history);
+        assert_eq!(accepted_baseline_in(&dir), None);
         assert_eq!(
-            baseline_file(&files).unwrap().0,
+            baseline_file(&files, None).unwrap().0,
             history.join("20260101T000000Z.json")
         );
+        let before = std::fs::read(history.join("20260102T000000Z.json")).unwrap();
         assert_eq!(accept_baseline_in(&dir).unwrap(), "20260102T000000Z.json");
-        let (path, run) = baseline_file(&files).unwrap();
+        assert_eq!(
+            std::fs::read(history.join("20260102T000000Z.json")).unwrap(),
+            before,
+            "the run file is never modified"
+        );
+        let accepted = accepted_baseline_in(&dir);
+        assert_eq!(accepted.as_deref(), Some("20260102T000000Z.json"));
+        let record = read_json(&accepted_baseline_path_in(&dir)).unwrap();
+        assert_eq!(record["accepted_by_user"], true);
+        assert!(
+            chrono::DateTime::parse_from_rfc3339(record["accepted_at"].as_str().unwrap()).is_ok()
+        );
+        let (path, run) = baseline_file(&files, accepted.as_deref()).unwrap();
         assert_eq!(path, history.join("20260102T000000Z.json"));
-        assert_eq!(run["accepted_by_user"], true);
+        assert!(run.get("accepted_by_user").is_none());
         assert_eq!(run["incomplete"], true, "the run itself is unchanged");
-        assert_eq!(history_entry_json(&path).unwrap()["accepted_by_user"], true);
+        assert_eq!(
+            history_entry_json(&path, accepted.as_deref()).unwrap()["accepted_by_user"],
+            true
+        );
+        assert_eq!(
+            history_entry_json(&history.join("20260101T000000Z.json"), accepted.as_deref())
+                .unwrap()["accepted_by_user"],
+            false
+        );
+
+        // A later incomplete run does not displace the accepted one; a
+        // later complete run does.
+        write_json_atomic(&history.join("20260103T000000Z.json"), &incomplete).unwrap();
+        let files = history_files_in(&history);
+        assert_eq!(
+            baseline_file(&files, accepted.as_deref()).unwrap().0,
+            history.join("20260102T000000Z.json")
+        );
+        write_json_atomic(&history.join("20260104T000000Z.json"), &complete).unwrap();
+        let files = history_files_in(&history);
+        assert_eq!(
+            baseline_file(&files, accepted.as_deref()).unwrap().0,
+            history.join("20260104T000000Z.json")
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn accepting_a_stamped_run_keeps_its_checksum_and_the_documented_recipe_is_the_code() {
+        use sha2::{Digest, Sha256};
+        // The recipe as docs/EXPOSURE_CHECK.md and the checksum note state it.
+        let documented = |run: &serde_json::Value| {
+            let mut body = run.clone();
+            let object = body.as_object_mut().unwrap();
+            object.remove("generated_at");
+            object.remove("accepted_by_user");
+            if let Some(stamp) = object
+                .get_mut("attestation")
+                .and_then(|a| a.as_object_mut())
+            {
+                stamp.remove("digest");
+            }
+            format!("sha256:{:x}", Sha256::digest(body.to_string().as_bytes()))
+        };
+        let dir = std::env::temp_dir().join(format!(
+            "gorse-accept-stamped-{}-{}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        let history = dir.join("history");
+        std::fs::create_dir_all(&history).unwrap();
+        let mut run = report(vec![finding("AwsKey", "~/.aws/credentials", "a", "high")]);
+        run["generated_at"] = serde_json::json!("2026-11-03T09:00:00+00:00");
+        run["recorded_at"] = serde_json::json!("2026-11-03T09:00:00Z");
+        run["incomplete"] = serde_json::json!(true);
+        run["attestation"] = serde_json::json!({
+            "holder": "holder@example.com",
+            "machine": "machine-0001",
+            "verified_at": "2026-11-03T09:00:00Z",
+        });
+        let digest = crate::exposure::digest_of_json(run.clone());
+        assert_eq!(digest, documented(&run));
+        run["attestation"]["digest"] = serde_json::json!(digest);
+        let path = history.join("20261103T090000Z.json");
+        write_json_atomic(&path, &run).unwrap();
+        assert_eq!(accept_baseline_in(&dir).unwrap(), "20261103T090000Z.json");
+        let stored = read_json(&path).unwrap();
+        assert_eq!(stored, run, "the run file is never modified");
+        assert_eq!(documented(&stored), stored["attestation"]["digest"]);
+        assert_eq!(
+            crate::exposure::digest_of_json(stored.clone()),
+            stored["attestation"]["digest"]
+        );
+        // A legacy file that carries accepted_by_user still recomputes.
+        let mut legacy = stored.clone();
+        legacy["accepted_by_user"] = serde_json::json!(true);
+        assert_eq!(documented(&legacy), stored["attestation"]["digest"]);
+        assert_eq!(
+            crate::exposure::digest_of_json(legacy),
+            stored["attestation"]["digest"]
+        );
+        let files = history_files_in(&history);
+        let accepted = accepted_baseline_in(&dir);
+        assert_eq!(baseline_file(&files, accepted.as_deref()).unwrap().0, path);
+        assert!(baseline_file(&files, None).is_none());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_legacy_in_file_acceptance_is_still_honoured() {
+        let dir = std::env::temp_dir().join(format!(
+            "gorse-accept-legacy-{}-{}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        let history = dir.join("history");
+        std::fs::create_dir_all(&history).unwrap();
+        let mut legacy = report(vec![]);
+        legacy["incomplete"] = serde_json::json!(true);
+        legacy["accepted_by_user"] = serde_json::json!(true);
+        write_json_atomic(&history.join("20260101T000000Z.json"), &report(vec![])).unwrap();
+        write_json_atomic(&history.join("20260102T000000Z.json"), &legacy).unwrap();
+        let files = history_files_in(&history);
+        assert_eq!(
+            baseline_file(&files, None).unwrap().0,
+            history.join("20260102T000000Z.json")
+        );
+        // A baseline.json naming something that is not a plain file name is
+        // ignored.
+        for bad in ["../history/20260101T000000Z.json", "", "a/b.json"] {
+            write_json_atomic(
+                &accepted_baseline_path_in(&dir),
+                &serde_json::json!({"file": bad, "accepted_by_user": true}),
+            )
+            .unwrap();
+            assert_eq!(accepted_baseline_in(&dir), None, "{bad}");
+        }
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -2928,11 +3101,11 @@ Internal requirements count=0 size=12\n";
             .collect();
         files.sort();
         files.reverse();
-        let (path, run) = baseline_file(&files).unwrap();
+        let (path, run) = baseline_file(&files, None).unwrap();
         assert!(path.ends_with("20260101T000001Z.json"));
         assert_eq!(run["findings"].as_array().unwrap().len(), 1);
         assert!(
-            baseline_file(&files[..2]).is_none(),
+            baseline_file(&files[..2], None).is_none(),
             "only incomplete runs: no baseline"
         );
         std::fs::remove_dir_all(&dir).unwrap();

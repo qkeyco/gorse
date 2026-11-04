@@ -193,12 +193,20 @@ It is never treated as an unnamed approval step.
    fingerprint for the laptop, the UTC time the run finished, and a checksum.
    The checksum covers the report and its stamp. It detects accidental or
    careless edits; it is not a cryptographic signature and does not prove who
-   produced the report. It is `sha256:` followed by the hex SHA-256 of the
-   JSON report serialised compactly with keys sorted, with the top-level
-   `generated_at` and `accepted_by_user` members and the `attestation.digest` member removed and
-   `attestation.holder`, `attestation.machine` and `attestation.verified_at`
-   left in, so editing a finding or any of those three fields changes it and
-   anyone holding the JSON can recompute it. The checksum is computed last,
+   produced the report. It is `sha256:` followed by the lowercase hex SHA-256
+   of the JSON report serialised compactly with keys sorted, with the
+   top-level `generated_at` member and the `attestation.digest` member
+   removed and `attestation.holder`, `attestation.machine` and
+   `attestation.verified_at` left in, so editing a finding or any of those
+   three fields changes it and anyone holding the JSON can recompute it.
+   History files written by older versions may also carry a top-level
+   `accepted_by_user` member (an earlier `gorse schedule accept-baseline`
+   wrote it into the run); it is not part of the check result and is removed
+   too. Current versions never modify a recorded run: accepting a baseline
+   writes `~/.hedgehog/exposure/baseline.json`
+   (`{"file": "<run file name>", "accepted_at": "<RFC 3339 time>",
+   "accepted_by_user": true}`) instead, and the accepted run stays the
+   baseline, even if incomplete, until a newer complete run exists. The checksum is computed last,
    over the report exactly as emitted: when the run is recorded into history
    (`--record`, which the apps always use) it covers the `changes`,
    `recorded_at` and `trigger` members as well, and the copy kept in history

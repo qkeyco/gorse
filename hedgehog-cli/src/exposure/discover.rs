@@ -67,6 +67,13 @@ pub struct Discovered {
     pub links: Vec<Link>,
     /// Name to use when matching `--verify` results back (profile, context, host).
     pub verify_key: Option<String>,
+    /// The file this credential was read from, as an absolute path, or
+    /// `None` when it came from the environment or a running agent. The
+    /// display `location` is for people and may carry a note in
+    /// parentheses; verification and coverage use this path, never a path
+    /// recovered from the location text (a file may itself be named
+    /// `config (production).yaml`).
+    pub source: Option<PathBuf>,
 }
 
 /// Everything discovery needs; constructed explicitly so tests can point it
@@ -556,11 +563,12 @@ fn aws(ctx: &mut Context) -> Vec<Discovered> {
         if broken.contains(profile) {
             continue;
         }
-        let location = if map.contains_key("aws_access_key_id") {
-            ctx.display(&creds_path)
+        let source_path = if map.contains_key("aws_access_key_id") {
+            creds_path.clone()
         } else {
-            ctx.display(&config_path)
+            config_path.clone()
         };
+        let location = ctx.display(&source_path);
         let mut cred;
         let mut links = Vec::new();
         let account_hint = map.get("sso_account_id").cloned().or_else(|| {
@@ -715,6 +723,7 @@ fn aws(ctx: &mut Context) -> Vec<Discovered> {
             credential: cred,
             links,
             verify_key: Some(profile.clone()),
+            source: Some(source_path),
         });
     }
 
@@ -758,6 +767,7 @@ fn aws(ctx: &mut Context) -> Vec<Discovered> {
                 credential: cred,
                 links: Vec::new(),
                 verify_key: None,
+                source: Some(entry.path()),
             });
         }
     }
@@ -783,6 +793,7 @@ fn aws(ctx: &mut Context) -> Vec<Discovered> {
             credential: cred,
             links: Vec::new(),
             verify_key: None,
+            source: None,
         });
     }
     out
@@ -821,12 +832,14 @@ fn gcp(ctx: &mut Context) -> Vec<Discovered> {
     let mut out = Vec::new();
     let adc = ctx.path(".config/gcloud/application_default_credentials.json");
     if let Some(v) = ctx.read_json(&adc) {
-        out.push(gcp_credential_from_json(
+        let mut d = gcp_credential_from_json(
             ctx,
             &v,
             &ctx.display(&adc),
             "application default credentials",
-        ));
+        );
+        d.source = Some(adc.clone());
+        out.push(d);
     }
     if let Some(path) = ctx.env.get("GOOGLE_APPLICATION_CREDENTIALS").cloned() {
         let p = PathBuf::from(&path);
@@ -845,6 +858,16 @@ fn gcp(ctx: &mut Context) -> Vec<Discovered> {
         let ini = parsers::parse_ini(&text);
         if has_content(&text) && ini.is_empty() {
             ctx.could_not_interpret(&cfg);
+        }
+        // A section with a line the parser cannot read may hide the account.
+        let malformed = parsers::ini_malformed_sections(&text);
+        for section in &malformed {
+            let entry = if section.is_empty() {
+                "the lines before the first section".to_string()
+            } else {
+                format!("section {section}")
+            };
+            ctx.could_not_interpret_entry(&cfg, &entry);
         }
         let core = ini
             .iter()
@@ -883,6 +906,7 @@ fn gcp(ctx: &mut Context) -> Vec<Discovered> {
                 credential: cred,
                 links,
                 verify_key: Some(account.clone()),
+                source: Some(cfg.clone()),
             });
         }
     }
@@ -951,6 +975,7 @@ fn gcp_credential_from_json(
         credential: cred,
         links,
         verify_key: None,
+        source: None,
     }
 }
 
@@ -960,11 +985,16 @@ fn azure(ctx: &mut Context) -> Vec<Discovered> {
     let mut out = Vec::new();
     let profile = ctx.path(".azure/azureProfile.json");
     if let Some(v) = ctx.read_json(&profile) {
-        if !v.is_object() || !(v["subscriptions"].is_array() || v["subscriptions"].is_null()) {
+        // Subscriptions missing or not a list: the file was not understood.
+        if !v.is_object() || !v["subscriptions"].is_array() {
             ctx.could_not_interpret(&profile);
         }
         let subs = v["subscriptions"].as_array().cloned().unwrap_or_default();
-        for sub in subs {
+        for (i, sub) in subs.into_iter().enumerate() {
+            if !sub.is_object() {
+                ctx.could_not_interpret_entry(&profile, &format!("subscription entry {}", i + 1));
+                continue;
+            }
             let name = sub["name"].as_str().unwrap_or("subscription");
             let user = sub["user"]["name"].as_str().unwrap_or("?");
             let user_type = sub["user"]["type"].as_str().unwrap_or("user");
@@ -973,7 +1003,13 @@ fn azure(ctx: &mut Context) -> Vec<Discovered> {
             } else {
                 CredentialKind::AzureSession
             };
-            let mut c = DiscoveredCredential::new(kind, name, &ctx.display(&profile), "Azure");
+            let Some(id) = sub["id"].as_str().filter(|id| !id.trim().is_empty()) else {
+                ctx.could_not_interpret_entry(&profile, &format!("subscription {name}"));
+                continue;
+            };
+            // Display names are not unique; the id is what binds the check.
+            let label = format!("{name} ({id})");
+            let mut c = DiscoveredCredential::new(kind, &label, &ctx.display(&profile), "Azure");
             c.permissions.identity = Some(user.to_string());
             c.permissions.organization = sub["tenantId"].as_str().map(|t| format!("tenant {t}"));
             c.permissions.automated = if kind == CredentialKind::AzureServicePrincipal {
@@ -1010,7 +1046,8 @@ fn azure(ctx: &mut Context) -> Vec<Discovered> {
             out.push(Discovered {
                 credential: c,
                 links,
-                verify_key: Some(user.to_string()),
+                verify_key: Some(id.to_string()),
+                source: Some(profile.clone()),
             });
         }
     }
@@ -1019,7 +1056,17 @@ fn azure(ctx: &mut Context) -> Vec<Discovered> {
         if !v.is_array() {
             ctx.could_not_interpret(&sp);
         }
-        for entry in v.as_array().cloned().unwrap_or_default() {
+        for (i, entry) in v
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .enumerate()
+        {
+            if !entry.is_object() {
+                ctx.could_not_interpret_entry(&sp, &format!("entry {}", i + 1));
+                continue;
+            }
             let client = entry["client_id"].as_str().unwrap_or("?");
             let mut c = DiscoveredCredential::new(
                 CredentialKind::AzureServicePrincipal,
@@ -1039,6 +1086,7 @@ fn azure(ctx: &mut Context) -> Vec<Discovered> {
                 credential: c,
                 links: Vec::new(),
                 verify_key: None,
+                source: Some(sp.clone()),
             });
         }
     }
@@ -1049,15 +1097,25 @@ fn azure(ctx: &mut Context) -> Vec<Discovered> {
 
 fn secrets_managers(ctx: &mut Context) -> Vec<Discovered> {
     let mut out = Vec::new();
+    // ~/.vault-token and VAULT_TOKEN are separate credentials when both
+    // exist: each is its own finding, verified with its own token.
     let vault_token = ctx.path(".vault-token");
-    let token_text = ctx.read(&vault_token);
-    let env_token = ctx.env.get("VAULT_TOKEN").cloned();
-    if token_text.is_some() || env_token.is_some() {
-        let (material, location) = match (&token_text, &env_token) {
-            (Some(t), _) => (t.trim().to_string(), ctx.display(&vault_token)),
-            (None, Some(t)) => (t.clone(), "env VAULT_TOKEN".to_string()),
-            _ => unreachable!(),
-        };
+    let mut found: Vec<(String, String, Option<PathBuf>)> = Vec::new();
+    if let Some(t) = ctx.read(&vault_token) {
+        if t.trim().is_empty() {
+            ctx.could_not_interpret(&vault_token);
+        } else {
+            found.push((
+                t.trim().to_string(),
+                ctx.display(&vault_token),
+                Some(vault_token.clone()),
+            ));
+        }
+    }
+    if let Some(t) = ctx.env.get("VAULT_TOKEN").filter(|t| !t.trim().is_empty()) {
+        found.push((t.clone(), "env VAULT_TOKEN".to_string(), None));
+    }
+    for (material, location, source) in found {
         let addr = ctx
             .env
             .get("VAULT_ADDR")
@@ -1085,6 +1143,7 @@ fn secrets_managers(ctx: &mut Context) -> Vec<Discovered> {
             credential: c,
             links,
             verify_key: Some("vault".into()),
+            source,
         });
     }
     let others: &[(&str, &str, &str)] = &[
@@ -1117,6 +1176,7 @@ fn secrets_managers(ctx: &mut Context) -> Vec<Discovered> {
                 credential: c,
                 links,
                 verify_key: None,
+                source: Some(p.clone()),
             });
         }
     }
@@ -1161,6 +1221,10 @@ fn github_token_kind(token: &str) -> (&'static str, Lifetime, Capability) {
     }
 }
 
+/// The evidence on a saved gh login whose token is in the system keyring
+/// rather than written in hosts.yml.
+pub const GH_KEYRING_EVIDENCE: &str = "token stored in the system keyring";
+
 fn github(ctx: &mut Context) -> Vec<Discovered> {
     let mut out = Vec::new();
     let hosts = ctx.path(".config/gh/hosts.yml");
@@ -1170,6 +1234,12 @@ fn github(ctx: &mut Context) -> Vec<Discovered> {
             ctx.could_not_interpret(&hosts);
         }
         for (host, entry) in y.entries() {
+            // Each host is a mapping of user, token and protocol; one that
+            // is not hides whatever login it was meant to hold.
+            if !matches!(entry, Yaml::Map(_)) {
+                ctx.could_not_interpret_entry(&hosts, &format!("host {host}"));
+                continue;
+            }
             let user = entry.str("user").unwrap_or("?").to_string();
             let token = entry.str("oauth_token").map(|s| s.to_string());
             let mut c = DiscoveredCredential::new(
@@ -1188,7 +1258,7 @@ fn github(ctx: &mut Context) -> Vec<Discovered> {
                     c.permissions.lifetime = lifetime;
                     c.evidence.push(desc.to_string());
                 }
-                None => c.evidence.push("token stored in the system keyring".into()),
+                None => c.evidence.push(GH_KEYRING_EVIDENCE.into()),
             }
             c.persistence = Persistence::IndependentCredential;
             c.evidence.push("gh scopes are unknown until verified; `repo` and `workflow` scopes allow pushing code and editing CI".into());
@@ -1220,6 +1290,7 @@ fn github(ctx: &mut Context) -> Vec<Discovered> {
                 credential: c,
                 links,
                 verify_key: Some(host.clone()),
+                source: Some(hosts.clone()),
             });
         }
     }
@@ -1241,6 +1312,7 @@ fn github(ctx: &mut Context) -> Vec<Discovered> {
                 credential: c,
                 links: Vec::new(),
                 verify_key: None,
+                source: None,
             });
         }
     }
@@ -1283,6 +1355,7 @@ fn github(ctx: &mut Context) -> Vec<Discovered> {
                 credential: c,
                 links,
                 verify_key: None,
+                source: Some(git_creds.clone()),
             });
         }
     }
@@ -1312,6 +1385,7 @@ fn github(ctx: &mut Context) -> Vec<Discovered> {
                     credential: c,
                     links: Vec::new(),
                     verify_key: None,
+                    source: Some(entry.path()),
                 });
             }
         }
@@ -1418,6 +1492,10 @@ fn other_ci(ctx: &mut Context) -> Vec<Discovered> {
     for s in &sources {
         let p = ctx.path(s.rel);
         let Some(text) = ctx.read(&p) else { continue };
+        if has_content(&text) && !ci_config_understood(s.rel, &text) {
+            ctx.could_not_interpret(&p);
+            continue;
+        }
         let token_line = text.lines().find(|l| {
             l.contains(s.token_key)
                 && (l.contains(':') || l.contains('='))
@@ -1446,6 +1524,7 @@ fn other_ci(ctx: &mut Context) -> Vec<Discovered> {
             credential: c,
             links,
             verify_key: None,
+            source: Some(p.clone()),
         });
     }
     // Heroku / generic .netrc
@@ -1480,10 +1559,37 @@ fn other_ci(ctx: &mut Context) -> Vec<Discovered> {
                 credential: c,
                 links: Vec::new(),
                 verify_key: None,
+                source: Some(netrc.clone()),
             });
         }
     }
     out
+}
+
+/// Whether a CI or publishing CLI's config file has the structure its
+/// format calls for: a JSON object, a YAML mapping, `key=value` lines
+/// (.npmrc) or INI sections (.pypirc). A file with that structure and no
+/// token is a configuration without a login; one without it was not
+/// understood, and a token in it would otherwise vanish silently.
+fn ci_config_understood(rel: &str, text: &str) -> bool {
+    if rel.ends_with(".json") {
+        return serde_json::from_str::<serde_json::Value>(text).is_ok_and(|v| v.is_object());
+    }
+    if rel.ends_with(".yml") || rel.ends_with(".yaml") {
+        return matches!(parsers::parse_yaml(text), Yaml::Map(ref m) if !m.is_empty());
+    }
+    if rel.ends_with(".pypirc") {
+        return !parsers::parse_ini(text).is_empty()
+            && parsers::ini_malformed_sections(text).is_empty();
+    }
+    if rel.ends_with(".npmrc") {
+        return text
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty() && !l.starts_with('#') && !l.starts_with(';'))
+            .all(|l| l.find('=').is_some_and(|i| !l[..i].trim().is_empty()));
+    }
+    true
 }
 
 // ─── Docker registries ───────────────────────────────────────────────────────
@@ -1551,6 +1657,7 @@ fn docker(ctx: &mut Context) -> Vec<Discovered> {
                 credential: c,
                 links,
                 verify_key: None,
+                source: Some(p.clone()),
             });
         }
     }
@@ -1582,8 +1689,12 @@ fn kubernetes(ctx: &mut Context) -> Vec<Discovered> {
     let mut out = Vec::new();
     let mut files = vec![ctx.path(".kube/config")];
     if let Some(list) = ctx.env.get("KUBECONFIG") {
-        for part in list.split(':').filter(|s| !s.is_empty()) {
-            files.push(PathBuf::from(part));
+        // The platform's own list separator: ':' on Unix, ';' on Windows,
+        // where paths themselves contain ':' after the drive letter.
+        for part in std::env::split_paths(list) {
+            if !part.as_os_str().is_empty() {
+                files.push(part);
+            }
         }
     }
     files.dedup();
@@ -1775,6 +1886,7 @@ fn kubernetes(ctx: &mut Context) -> Vec<Discovered> {
                 credential: c,
                 links,
                 verify_key: Some(name.to_string()),
+                source: Some(file.clone()),
             });
         }
         // `contexts: []` (or no value) is a kubeconfig with nothing in it;
@@ -1862,6 +1974,7 @@ fn terraform(ctx: &mut Context) -> Vec<Discovered> {
                     credential: c,
                     links,
                     verify_key: None,
+                    source: Some(p.clone()),
                 });
             }
         }
@@ -1889,6 +2002,7 @@ fn terraform(ctx: &mut Context) -> Vec<Discovered> {
                 )
                 .production(true)],
                 verify_key: None,
+                source: None,
             });
         }
     }
@@ -1924,6 +2038,7 @@ fn terraform(ctx: &mut Context) -> Vec<Discovered> {
                     )
                     .production(true)],
                     verify_key: None,
+                    source: Some(pulumi.clone()),
                 });
             }
         }
@@ -1951,6 +2066,20 @@ fn doctl_config_paths(ctx: &Context) -> Vec<PathBuf> {
     paths
 }
 
+/// The key of a doctl config's top-level `access-token`, which doctl uses
+/// for its default context (the finding is named `default`).
+pub const DOCTL_TOP_LEVEL: &str = "access-token";
+
+/// The finding name of a context called `default` under `auth-contexts`,
+/// which is not the token doctl's default context uses.
+pub const DOCTL_DEFAULT_CONTEXT: &str = "auth-contexts default";
+
+/// The verification-key prefix of a doctl token that is checked through a
+/// temporary config holding only that token: the top-level access-token
+/// (`config-token:access-token`) and a context named `default`
+/// (`config-token:default`).
+pub const DOCTL_TOKEN_KEY: &str = "config-token:";
+
 fn digitalocean(ctx: &mut Context) -> Vec<Discovered> {
     let mut out = Vec::new();
     for p in doctl_config_paths(ctx) {
@@ -1959,20 +2088,41 @@ fn digitalocean(ctx: &mut Context) -> Vec<Discovered> {
         };
         let y = parsers::parse_yaml(&text);
         let current = y.str("context").unwrap_or("default").trim().to_string();
-        let mut tokens: Vec<(String, String)> = Vec::new();
+        // (name, token, selected by doctl's `context:`, verification key).
+        // doctl's `--context default` reads the top-level access-token, so
+        // the top-level token and a context named default are each bound
+        // to a temporary config holding only that token, never by name.
+        let mut tokens: Vec<(String, String, bool, String)> = Vec::new();
         if let Some(t) = y
             .str("access-token")
             .map(str::trim)
             .filter(|t| !t.is_empty())
         {
-            tokens.push(("default".into(), t.to_string()));
+            tokens.push((
+                "default".into(),
+                t.to_string(),
+                current == "default",
+                format!("{DOCTL_TOKEN_KEY}{DOCTL_TOP_LEVEL}"),
+            ));
         }
         let mut broken_contexts = false;
         if let Some(contexts) = y.get("auth-contexts") {
             for (name, v) in contexts.entries() {
                 match v {
                     Yaml::Str(t) if !t.trim().is_empty() => {
-                        tokens.push((name.clone(), t.trim().to_string()))
+                        // doctl never selects a context named default
+                        // from auth-contexts (`--context default` is the
+                        // top-level token), so it gets a name of its own.
+                        let (label, key, selected) = if name == "default" {
+                            (
+                                DOCTL_DEFAULT_CONTEXT.to_string(),
+                                format!("{DOCTL_TOKEN_KEY}{name}"),
+                                false,
+                            )
+                        } else {
+                            (name.clone(), name.clone(), *name == current)
+                        };
+                        tokens.push((label, t.trim().to_string(), selected, key))
                     }
                     Yaml::Str(_) | Yaml::Null => {}
                     _ => {
@@ -1987,16 +2137,10 @@ fn digitalocean(ctx: &mut Context) -> Vec<Discovered> {
             ctx.could_not_interpret(&p);
         }
         let location = ctx.display(&p);
-        for (name, token) in tokens {
-            let selected = name == current;
-            out.push(digitalocean_token(
-                ctx,
-                &name,
-                &location,
-                &token,
-                selected,
-                Some(name.clone()),
-            ));
+        for (name, token, selected, key) in tokens {
+            let mut d = digitalocean_token(ctx, &name, &location, &token, selected, Some(key));
+            d.source = Some(p.clone());
+            out.push(d);
         }
     }
     for var in ["DIGITALOCEAN_ACCESS_TOKEN", "DIGITALOCEAN_TOKEN"] {
@@ -2098,10 +2242,19 @@ fn digitalocean_token(
         credential: c,
         links,
         verify_key,
+        source: None,
     }
 }
 
 // ─── SSH ─────────────────────────────────────────────────────────────────────
+
+/// Whether a file in ~/.ssh that is not a public key, certificate or one of
+/// ssh's own files looks like a private key: a PEM or OpenSSH private-key
+/// header, a PuTTY key, or the `id_*` name ssh-keygen gives keys.
+fn looks_like_private_key(name: &str, text: &str) -> bool {
+    let header = text.contains("-----BEGIN") && text.contains("PRIVATE KEY");
+    header || text.starts_with("PuTTY-User-Key-File") || name.starts_with("id_")
+}
 
 fn ssh(ctx: &mut Context) -> Vec<Discovered> {
     let mut out = Vec::new();
@@ -2175,6 +2328,7 @@ fn ssh(ctx: &mut Context) -> Vec<Discovered> {
                             credential: c,
                             links,
                             verify_key: None,
+                            source: Some(path.clone()),
                         });
                     }
                 }
@@ -2193,6 +2347,11 @@ fn ssh(ctx: &mut Context) -> Vec<Discovered> {
                 continue;
             };
             let Some(info) = parsers::inspect_ssh_private_key(&text) else {
+                // Not every file in ~/.ssh is a key, but one that looks like
+                // a key and cannot be read as one is lost coverage.
+                if has_content(&text) && looks_like_private_key(&name, &text) {
+                    ctx.could_not_interpret(&path);
+                }
                 continue;
             };
             let pub_path = path.with_extension("pub");
@@ -2262,6 +2421,7 @@ fn ssh(ctx: &mut Context) -> Vec<Discovered> {
                 credential: c,
                 links,
                 verify_key: None,
+                source: Some(path.clone()),
             });
         }
     }
@@ -2311,6 +2471,7 @@ fn ssh_agent(ctx: &mut Context) -> Vec<Discovered> {
                         credential: c,
                         links: Vec::new(),
                         verify_key: None,
+                        source: None,
                     });
                 }
             }
@@ -2555,6 +2716,7 @@ fn crypto_wallets(ctx: &mut Context) -> Vec<Discovered> {
                 credential: c,
                 links,
                 verify_key: None,
+                source: Some(path.clone()),
             });
         }
     }
@@ -2596,6 +2758,7 @@ fn crypto_wallets(ctx: &mut Context) -> Vec<Discovered> {
                     credential: c,
                     links,
                     verify_key: None,
+                    source: Some(sol.clone()),
                 });
             }
         }
@@ -2652,6 +2815,7 @@ fn crypto_wallets(ctx: &mut Context) -> Vec<Discovered> {
                 credential: c,
                 links,
                 verify_key: None,
+                source: Some(conf.clone()),
             });
         }
     }
@@ -2719,6 +2883,7 @@ fn crypto_wallets(ctx: &mut Context) -> Vec<Discovered> {
                 credential: c,
                 links: Vec::new(),
                 verify_key: None,
+                source: Some(p.clone()),
             });
         }
     }
@@ -2773,6 +2938,7 @@ fn crypto_wallets(ctx: &mut Context) -> Vec<Discovered> {
                         credential: c,
                         links: Vec::new(),
                         verify_key: None,
+                        source: Some(p.clone()),
                     });
                 }
             }
@@ -2803,6 +2969,7 @@ fn crypto_wallets(ctx: &mut Context) -> Vec<Discovered> {
                 credential: c,
                 links: Vec::new(),
                 verify_key: None,
+                source: Some(p.clone()),
             });
         }
     }
@@ -3013,6 +3180,7 @@ fn declared_signers(ctx: &mut Context) -> Vec<Discovered> {
             credential: c,
             links,
             verify_key: Some(format!("signer:{}", signer.name)),
+            source: None,
         });
     }
     out
@@ -3493,6 +3661,7 @@ fn env_credential(
         credential: c,
         links,
         verify_key: None,
+        source: None,
     }
 }
 
@@ -3548,9 +3717,9 @@ fn project_env_files(ctx: &mut Context) -> Vec<Discovered> {
                     continue;
                 }
                 let location = format!("{} ({key})", ctx.display(&path));
-                out.push(env_credential(
-                    ctx, kind, key, &location, &target, &desc, value,
-                ));
+                let mut d = env_credential(ctx, kind, key, &location, &target, &desc, value);
+                d.source = Some(path.clone());
+                out.push(d);
             }
         }
     }
@@ -3671,7 +3840,10 @@ mod tests {
         let staging = by_name("staging");
         let env_token = by_name("DIGITALOCEAN_TOKEN");
         assert_eq!(default.credential.location, "~/.config/doctl/config.yaml");
-        assert_eq!(default.verify_key.as_deref(), Some("default"));
+        assert_eq!(
+            default.verify_key.as_deref(),
+            Some("config-token:access-token")
+        );
         assert_eq!(staging.verify_key.as_deref(), Some("staging"));
         assert_eq!(env_token.credential.location, "env DIGITALOCEAN_TOKEN");
         assert_eq!(
@@ -4503,5 +4675,215 @@ mod tests {
             offending.is_empty(),
             "use ctx.present() instead of .exists() on credential locations: {offending:?}"
         );
+    }
+
+    #[test]
+    fn vault_file_and_environment_tokens_are_separate_findings() {
+        let home = fixture_home();
+        write(&home, ".vault-token", "hvs.filetoken\n");
+        let decl = Declarations::default();
+        let mut c = ctx(&home, &decl);
+        c.env.insert("VAULT_TOKEN".into(), "hvs.envtoken".into());
+        let found: Vec<Discovered> = discover_all(&mut c)
+            .into_iter()
+            .filter(|d| d.credential.kind == CredentialKind::VaultToken)
+            .collect();
+        let locations: Vec<&str> = found
+            .iter()
+            .map(|d| d.credential.location.as_str())
+            .collect();
+        assert_eq!(locations, ["~/.vault-token", "env VAULT_TOKEN"]);
+        assert_ne!(
+            found[0].credential.fingerprint,
+            found[1].credential.fingerprint
+        );
+        assert_eq!(
+            found[0].source.as_deref(),
+            Some(home.join(".vault-token").as_path())
+        );
+        assert_eq!(found[1].source, None);
+
+        // An empty token file is lost coverage, not a token.
+        write(&home, ".vault-token", "\n");
+        let (found, failures, _) = run_home(&home);
+        assert!(!found
+            .iter()
+            .any(|(d, _)| d.credential.kind == CredentialKind::VaultToken));
+        assert!(
+            failures.iter().any(|f| f.location == "~/.vault-token"),
+            "{:?}",
+            reasons(&failures)
+        );
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    #[test]
+    fn a_parenthesised_file_name_is_kept_whole_as_the_source() {
+        let home = fixture_home();
+        let file = home.join("config (production).yaml");
+        std::fs::write(
+            &file,
+            "current-context: prod\nclusters:\n  - name: prod\n    cluster:\n      server: https://cluster.invalid\nusers:\n  - name: op\n    user:\n      token: synthetic\ncontexts:\n  - name: prod\n    context:\n      cluster: prod\n      user: op\n",
+        )
+        .unwrap();
+        let decl = Declarations::default();
+        let mut c = ctx(&home, &decl);
+        c.env
+            .insert("KUBECONFIG".into(), file.display().to_string());
+        let found: Vec<Discovered> = discover_all(&mut c)
+            .into_iter()
+            .filter(|d| d.credential.kind == CredentialKind::KubernetesContext)
+            .collect();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].source.as_deref(), Some(file.as_path()));
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    #[test]
+    fn malformed_cloud_and_gh_entries_are_lost_coverage() {
+        let home = fixture_home();
+        // gcloud: a section with a line the parser cannot read.
+        write(
+            &home,
+            ".config/gcloud/configurations/config_default",
+            "[core]\naccount = alice@example.com\nproject prod\n",
+        );
+        // gh: one host is a mapping, the other is not.
+        write(
+            &home,
+            ".config/gh/hosts.yml",
+            "github.com:\n    user: alice\n    oauth_token: gho_synthetic\nghe.example.com: broken\n",
+        );
+        // Azure: one subscription is not an object; service principals
+        // hold a non-object entry.
+        write(
+            &home,
+            ".azure/azureProfile.json",
+            r#"{"subscriptions":[{"id":"00000000-0000-0000-0000-000000000001","name":"Dev","user":{"name":"a@example.com","type":"user"}},"oops"]}"#,
+        );
+        write(
+            &home,
+            ".azure/service_principal_entries.json",
+            r#"[{"client_id":"c1","tenant":"t"},42]"#,
+        );
+        let (found, failures, _) = run_home(&home);
+        let reasons = reasons(&failures);
+        for expected in [
+            "could not interpret section core in ~/.config/gcloud/configurations/config_default",
+            "could not interpret host ghe.example.com in ~/.config/gh/hosts.yml",
+            "could not interpret subscription entry 2 in ~/.azure/azureProfile.json",
+            "could not interpret entry 2 in ~/.azure/service_principal_entries.json",
+        ] {
+            assert!(
+                reasons.iter().any(|r| r == expected),
+                "{expected}: {reasons:?}"
+            );
+        }
+        let names: Vec<&str> = found
+            .iter()
+            .map(|(d, _)| d.credential.name.as_str())
+            .collect();
+        assert!(names.contains(&"gh login github.com"), "{names:?}");
+        assert!(
+            names.contains(&"Dev (00000000-0000-0000-0000-000000000001)"),
+            "{names:?}"
+        );
+
+        // Subscriptions missing, or not a list; service principals not a
+        // list.
+        for profile in [r#"{"installationId":"x"}"#, r#"{"subscriptions":{}}"#] {
+            write(&home, ".azure/azureProfile.json", profile);
+            write(&home, ".azure/service_principal_entries.json", r#"{"a":1}"#);
+            let (_, failures, _) = run_home(&home);
+            let reasons = super::tests::reasons(&failures);
+            for expected in [
+                "could not interpret ~/.azure/azureProfile.json (unsupported format)",
+                "could not interpret ~/.azure/service_principal_entries.json (unsupported format)",
+            ] {
+                assert!(
+                    reasons.iter().any(|r| r == expected),
+                    "{expected}: {reasons:?}"
+                );
+            }
+        }
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    #[test]
+    fn ci_token_files_without_their_structure_are_lost_coverage() {
+        let cases = [
+            (".vercel/auth.json", "token: not json"),
+            (".config/netlify/config.json", "[1, 2]"),
+            (".railway/config.json", "{\"token\": "),
+            (".config/glab-cli/config.yml", "just a sentence"),
+            (".circleci/cli.yml", "- token\n- list\n"),
+            (".fly/config.yml", "access_token"),
+            (".npmrc", "//registry.npmjs.org/:_authToken npm_synthetic\n"),
+            (".pypirc", "password pypi-synthetic\n"),
+        ];
+        for (rel, text) in cases {
+            let home = fixture_home();
+            write(&home, rel, text);
+            let (found, failures, coverage) = run_home(&home);
+            let expected = format!("could not interpret ~/{rel} (unsupported format)");
+            assert!(
+                reasons(&failures).iter().any(|r| *r == expected),
+                "{rel}: {:?}",
+                reasons(&failures)
+            );
+            assert!(!coverage.assessed.iter().any(|s| s == "ci-tokens"), "{rel}");
+            assert!(found
+                .iter()
+                .all(|(d, _)| !d.credential.location.contains(rel)));
+            std::fs::remove_dir_all(&home).ok();
+        }
+        // Well-formed files with and without a token are not failures.
+        let home = fixture_home();
+        write(&home, ".npmrc", "registry=https://registry.npmjs.org/\n");
+        write(
+            &home,
+            ".vercel/auth.json",
+            r#"{"token":"vercel_synthetic"}"#,
+        );
+        write(&home, ".pypirc", "[distutils]\nindex-servers = pypi\n");
+        let (found, failures, _) = run_home(&home);
+        assert!(failures.is_empty(), "{:?}", reasons(&failures));
+        assert!(found.iter().any(|(d, _)| d.credential.name == "Vercel CLI"));
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    #[test]
+    fn an_unreadable_private_key_in_ssh_is_lost_coverage() {
+        let home = fixture_home();
+        write(&home, ".ssh/id_work", "this is not a key\n");
+        write(
+            &home,
+            ".ssh/deploy",
+            // A key header the parser does not accept where it is.
+            "pasted from chat:\n-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAA\n-----END OPENSSH PRIVATE KEY-----\n",
+        );
+        // ssh's own files and public keys never count.
+        write(&home, ".ssh/known_hosts", "github.com ssh-ed25519 AAAA\n");
+        write(&home, ".ssh/config", "Host *\n  User me\n");
+        write(&home, ".ssh/authorized_keys", "ssh-ed25519 AAAA me\n");
+        write(&home, ".ssh/id_work.pub", "ssh-ed25519 AAAA me\n");
+        write(&home, ".ssh/.DS_Store", "\0\0\0\x01Bud1");
+        write(&home, ".ssh/notes.txt", "remember to rotate\n");
+        let (_, failures, _) = run_home(&home);
+        // Windows reports home-relative paths with backslashes.
+        let reasons: Vec<String> = reasons(&failures)
+            .into_iter()
+            .map(|r| r.replace('\\', "/"))
+            .collect();
+        let ssh: Vec<&String> = reasons.iter().filter(|r| r.contains("~/.ssh/")).collect();
+        assert_eq!(
+            ssh,
+            [
+                "could not interpret ~/.ssh/deploy (unsupported format)",
+                "could not interpret ~/.ssh/id_work (unsupported format)",
+            ],
+            "{reasons:?}"
+        );
+        std::fs::remove_dir_all(&home).ok();
     }
 }

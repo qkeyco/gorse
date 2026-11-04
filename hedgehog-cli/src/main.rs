@@ -1022,9 +1022,9 @@ fn load_engine() -> PackEngine {
 /// Detect whether DCG (Destructive Command Guard) is installed.
 fn dcg_detected() -> bool {
     // Check for DCG binary on PATH
-    if let Ok(path) = std::env::var("PATH") {
-        for dir in path.split(':') {
-            if std::path::Path::new(dir).join("dcg").exists() {
+    if let Some(path) = std::env::var_os("PATH") {
+        for dir in std::env::split_paths(&path) {
+            if dir.join("dcg").exists() {
                 return true;
             }
         }

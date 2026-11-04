@@ -133,7 +133,6 @@ pub fn score_finding(
     // every claim behind the severity. An identity confirmation alone never
     // leaves it confirmed: see the end of this function.
     let mut confidence = perms.assurance;
-    let mut raised = false;
     let mut reasons: Vec<String> = Vec::new();
     let mut controls: Vec<String> = Vec::new();
     let mut remediation: Vec<String> = Vec::new();
@@ -181,8 +180,9 @@ pub fn score_finding(
         } else {
             reasons.push(why);
         }
+        // A raise can only lower the confidence: never above the weakest
+        // assurance behind it.
         confidence = confidence.weakest(assurance);
-        raised = true;
     };
 
     let mut path_summaries = Vec::new();
@@ -529,13 +529,14 @@ pub fn score_finding(
     } else {
         persistence = Persistence::RequiresEndpoint;
     }
-    // Nothing raised the severity, so the confidence is about the
-    // capabilities found (or not found): confirmed only when every one that
-    // was determined was established by a provider check of that specific
-    // permission. Who the credential is never confirms what it can do.
-    // An expired or revoked credential is a statement about the credential
-    // itself and keeps its own assurance.
-    if !raised && !expired {
+    // The confidence is always capped by the capabilities behind it,
+    // whether or not anything raised the severity: confirmed only when every
+    // permission that bears on the severity was established by a provider
+    // check of that specific permission. A confirmed path does not confirm
+    // the capabilities that were never checked, and who the credential is
+    // never confirms what it can do. An expired or revoked credential is a
+    // statement about the credential itself and keeps its own assurance.
+    if !expired {
         confidence = confidence.weakest(perms.capabilities_assurance());
     }
 
@@ -822,12 +823,10 @@ mod tests {
     fn admin_flag_confirmed_is_high_and_inferred_is_medium() {
         let g = PermissionGraph::new();
         let mut credential = cred(CredentialKind::AwsAccessKey);
-        credential.permissions = EffectivePermissions {
-            assurance: Assurance::Confirmed,
-            administrative: Capability::Yes,
-            confirmed: vec![Permission::Administrative],
-            ..Default::default()
-        };
+        credential.permissions = all_confirmed_no();
+        credential
+            .permissions
+            .confirm(Permission::Administrative, Capability::Yes);
         let f = score_finding(&g, &credential, &[]);
         assert_eq!(f.severity, Severity::High);
         assert_eq!(f.confidence, Assurance::Confirmed);
@@ -868,13 +867,119 @@ mod tests {
         let mut credential = cred(CredentialKind::GitHubToken);
         credential.permissions.assurance = Assurance::Confirmed;
         let f = score_finding(&g, &credential, &[]);
-        assert_eq!(f.confidence, Assurance::Inferred);
-        // A capability "no" the provider established is confirmed.
+        // Nothing about what it can do was determined.
+        assert_eq!(f.confidence, Assurance::Unknown);
+        // One capability "no" the provider established is not the whole:
+        // every other permission is still unknown.
         credential
             .permissions
             .confirm(Permission::Administrative, Capability::No);
         let f = score_finding(&g, &credential, &[]);
+        assert_eq!(f.confidence, Assurance::Inferred);
+        // Every permission that bears on the severity checked: confirmed.
+        credential.permissions = all_confirmed_no();
+        let f = score_finding(&g, &credential, &[]);
         assert_eq!(f.confidence, Assurance::Confirmed);
+    }
+
+    /// Identity confirmed and every severity-bearing permission confirmed "no".
+    fn all_confirmed_no() -> EffectivePermissions {
+        let mut p = EffectivePermissions {
+            assurance: Assurance::Confirmed,
+            ..Default::default()
+        };
+        for perm in Permission::SEVERITY_BEARING {
+            p.confirm(perm, Capability::No);
+        }
+        p
+    }
+
+    #[test]
+    fn aws_assumed_role_with_policy_listing_denied_is_inferred() {
+        // The provider confirmed the role can be assumed; listing its
+        // policies was denied, so nothing else is known.
+        let g = PermissionGraph::new();
+        let mut credential = cred(CredentialKind::AwsAccessKey);
+        credential.permissions.assurance = Assurance::Confirmed;
+        credential
+            .permissions
+            .confirm(Permission::AssumeRole, Capability::Yes);
+        let f = score_finding(&g, &credential, &[]);
+        assert_eq!(f.confidence, Assurance::Inferred);
+    }
+
+    #[test]
+    fn digitalocean_inactive_account_with_cluster_list_failed_is_inferred() {
+        let g = PermissionGraph::new();
+        let mut credential = cred(CredentialKind::DigitalOceanToken);
+        credential.permissions.assurance = Assurance::Confirmed;
+        credential
+            .permissions
+            .confirm(Permission::Administrative, Capability::No);
+        credential
+            .permissions
+            .confirm(Permission::ModifyProduction, Capability::No);
+        // The cluster listing failed: production access stays unknown.
+        credential
+            .permissions
+            .confirm(Permission::AccessProduction, Capability::Unknown);
+        let f = score_finding(&g, &credential, &[]);
+        assert_eq!(f.severity, Severity::Low);
+        assert_eq!(f.confidence, Assurance::Inferred);
+    }
+
+    #[test]
+    fn kubernetes_partial_can_i_is_inferred() {
+        // can-i failed for "* *" and "get secrets" but said "no" for
+        // "create deployments".
+        let g = PermissionGraph::new();
+        let mut credential = cred(CredentialKind::KubernetesContext);
+        credential.permissions.assurance = Assurance::Confirmed;
+        credential.permissions.revoked = Capability::No;
+        credential
+            .permissions
+            .confirm(Permission::Administrative, Capability::Unknown);
+        credential
+            .permissions
+            .confirm(Permission::CreateCredentials, Capability::Unknown);
+        credential
+            .permissions
+            .confirm(Permission::ModifyProduction, Capability::No);
+        let f = score_finding(&g, &credential, &[]);
+        assert_eq!(f.confidence, Assurance::Inferred);
+    }
+
+    #[test]
+    fn raised_severity_is_still_capped_by_capabilities() {
+        // A login path to a host nobody marked as production raises the
+        // severity through the discounted branch. The raise must not skip
+        // the cap: the capabilities were only partly checked.
+        for path_assurance in [Assurance::Confirmed, Assurance::Inferred] {
+            let mut g = PermissionGraph::new();
+            let c = g.node(NodeKind::Credential, "key");
+            let t = g.node(NodeKind::ProductionService, "devbox");
+            g.edge(c, t, EdgeKind::CanAuthenticate, path_assurance);
+            let paths = g.paths_between(c, t, 3);
+            let mut credential = cred(CredentialKind::SshPrivateKey);
+            credential.permissions.assurance = Assurance::Confirmed;
+            credential
+                .permissions
+                .confirm(Permission::Administrative, Capability::No);
+            let f = score_finding(&g, &credential, &paths);
+            assert!(f.severity >= Severity::Low);
+            assert_eq!(f.confidence, Assurance::Inferred, "{path_assurance:?}");
+        }
+        // With every capability confirmed, a confirmed path stays confirmed,
+        // and an inferred one never lifts it above inferred.
+        let mut g = PermissionGraph::new();
+        let c = g.node(NodeKind::Credential, "key");
+        let t = g.node(NodeKind::ProductionService, "devbox");
+        g.edge(c, t, EdgeKind::CanAuthenticate, Assurance::Inferred);
+        let paths = g.paths_between(c, t, 3);
+        let mut credential = cred(CredentialKind::SshPrivateKey);
+        credential.permissions = all_confirmed_no();
+        let f = score_finding(&g, &credential, &paths);
+        assert_eq!(f.confidence, Assurance::Inferred);
     }
 
     #[test]

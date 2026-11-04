@@ -775,7 +775,16 @@ fn losing_an_engine_that_found_nothing_is_incomplete_until_accepted() {
         &fs::read_to_string(home.exposure_dir().join("history").join(&latest)).unwrap(),
     )
     .unwrap();
-    assert_eq!(stored["accepted_by_user"], true);
+    assert!(
+        stored.get("accepted_by_user").is_none(),
+        "the run file is never modified"
+    );
+    let accepted: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(home.exposure_dir().join("baseline.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(accepted["file"], latest.as_str());
+    assert_eq!(accepted["accepted_by_user"], true);
     let (output, fourth) = run();
     assert_eq!(output.status.code(), Some(0), "{output:?} {fourth}");
     assert_eq!(fourth["incomplete"], false, "{fourth}");
@@ -784,6 +793,97 @@ fn losing_an_engine_that_found_nothing_is_incomplete_until_accepted() {
     let output = home.run(&["schedule", "accept-baseline"]);
     assert!(output.status.success(), "{output:?}");
     assert!(String::from_utf8_lossy(&output.stdout).contains("as the baseline"));
+}
+
+/// The checksum recipe exactly as docs/EXPOSURE_CHECK.md and the report's
+/// checksum note state it: `sha256:` + hex SHA-256 of the compact JSON
+/// (serde_json sorts keys) with the top-level `generated_at`, the top-level
+/// `accepted_by_user` that older history files may carry, and
+/// `attestation.digest` removed.
+fn documented_digest(run: &serde_json::Value) -> String {
+    use sha2::{Digest, Sha256};
+    let mut body = run.clone();
+    let object = body.as_object_mut().unwrap();
+    object.remove("generated_at");
+    object.remove("accepted_by_user");
+    if let Some(stamp) = object
+        .get_mut("attestation")
+        .and_then(|a| a.as_object_mut())
+    {
+        stamp.remove("digest");
+    }
+    format!("sha256:{:x}", Sha256::digest(body.to_string().as_bytes()))
+}
+
+#[test]
+fn accept_baseline_leaves_a_stamped_run_verifiable_and_follows_baseline_json() {
+    let home = TestHome::new();
+    let history = home.exposure_dir().join("history");
+
+    // A complete run, then a run that is incomplete and carries a verified
+    // stamp, as `--verify --record` writes it.
+    let (output, _) = home.json(&["exposure", "--json", "--record"]);
+    assert!(output.status.success(), "{output:?}");
+    let first = newest_run(&home);
+    let (output, _) = home.json(&["exposure", "--json", "--record"]);
+    assert!(output.status.success(), "{output:?}");
+    let stamped = newest_run(&home);
+    assert_ne!(first, stamped);
+    let stamped_path = history.join(&stamped);
+    let mut run: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&stamped_path).unwrap()).unwrap();
+    run["incomplete"] = serde_json::json!(true);
+    run["attestation"] = serde_json::json!({
+        "holder": "holder@example.com",
+        "machine": "machine-0001",
+        "verified_at": "2026-11-03T09:00:00Z",
+        "digest": "",
+    });
+    run["attestation"]["digest"] = serde_json::json!(documented_digest(&run));
+    fs::write(&stamped_path, serde_json::to_string_pretty(&run).unwrap()).unwrap();
+    let before = fs::read(&stamped_path).unwrap();
+
+    let (output, json) = home.json(&["schedule", "accept-baseline", "--json"]);
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(json["baseline"], stamped.as_str());
+
+    // The run file is byte-for-byte unchanged and its checksum recomputes
+    // with the documented recipe.
+    assert_eq!(fs::read(&stamped_path).unwrap(), before);
+    let after: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&stamped_path).unwrap()).unwrap();
+    assert!(after.get("accepted_by_user").is_none());
+    assert_eq!(
+        documented_digest(&after),
+        after["attestation"]["digest"].as_str().unwrap()
+    );
+
+    // The acceptance lives in baseline.json.
+    let accepted: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(home.exposure_dir().join("baseline.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(accepted["file"], stamped.as_str());
+    assert_eq!(accepted["accepted_by_user"], true);
+    assert!(accepted["accepted_at"].is_string());
+    let (output, listed) = home.json(&["schedule", "history", "--json"]);
+    assert!(output.status.success(), "{output:?}");
+    let runs = listed["runs"].as_array().unwrap();
+    let entry = |name: &str| runs.iter().find(|r| r["file"] == name).unwrap().clone();
+    assert_eq!(entry(&stamped)["accepted_by_user"], true);
+    assert_eq!(entry(&first)["accepted_by_user"], false);
+
+    // The next run is compared with the accepted (incomplete) run, not the
+    // older complete one ...
+    let (output, _) = home.json(&["exposure", "--json", "--record"]);
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(status(&home)["baseline"], stamped.as_str());
+    let third = newest_run(&home);
+    // ... until a newer complete run exists.
+    let (output, _) = home.json(&["exposure", "--json", "--record"]);
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(status(&home)["baseline"], third.as_str());
+    assert_eq!(fs::read(&stamped_path).unwrap(), before);
 }
 
 #[test]

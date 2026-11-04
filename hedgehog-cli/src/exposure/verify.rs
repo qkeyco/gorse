@@ -54,7 +54,7 @@
 use super::discover::{Discovered, Link};
 use hedgehog_taint::authority::graph::{EdgeKind, NodeKind};
 use hedgehog_taint::authority::{
-    redact_text, Assurance, Capability, CredentialKind, Lifetime, Permission,
+    redact_text, Assurance, Capability, CredentialKind, Fingerprint, Lifetime, Permission,
 };
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -507,9 +507,11 @@ pub fn aws_binding(profile: &str, found_in: &Path) -> CliBinding {
             ),
         ],
         remove: AWS_ENV_OVERRIDES.iter().map(|s| s.to_string()).collect(),
-        remove_prefixes: Vec::new(),
+        // AWS_ENDPOINT_URL and every AWS_ENDPOINT_URL_<SERVICE> would send
+        // the check to another endpoint.
+        remove_prefixes: vec!["AWS_ENDPOINT_URL".into()],
         evidence: format!(
-            "aws was bound to profile {profile} in {}: run with --profile and those files, with any credential or profile in the environment removed",
+            "aws was bound to profile {profile} in {}: run with --profile and those files, with any credential, profile or endpoint in the environment removed",
             dir.display()
         ),
     }
@@ -708,17 +710,15 @@ fn fallback_key(d: &Discovered) -> Option<String> {
     GH_TOKEN_VARS.contains(&var).then(|| format!("env:{var}"))
 }
 
-/// The display path of where a credential was found, without any
-/// parenthesised note, as an absolute path.
+/// The file a credential was found in, as an absolute path: the path
+/// discovery recorded. A location is display text and is never split to
+/// recover a path (a file may be named `config (production).yaml`); a
+/// credential discovery did not record a file for falls back to the whole
+/// location, which then names no file a provider tool can read.
 fn found_path(d: &Discovered, env: &BTreeMap<String, String>) -> PathBuf {
-    expand_home(
-        d.credential
-            .location
-            .split(" (")
-            .next()
-            .unwrap_or(&d.credential.location),
-        env,
-    )
+    d.source
+        .clone()
+        .unwrap_or_else(|| expand_home(&d.credential.location, env))
 }
 
 pub fn verify_all(
@@ -855,7 +855,32 @@ fn verify_aws(
     decl: &super::config::Declarations,
     env: &BTreeMap<String, String>,
 ) -> Result<Checked, String> {
-    let binding = aws_binding(profile, &found_path(d, env));
+    // A profile whose key sits in the credentials file may also have a
+    // role chain (role_arn, source_profile) in the config file, and
+    // `aws --profile` would then answer for the role, not the key. The key
+    // is checked on its own: a temporary credentials file holding only this
+    // profile's key, and an empty config file.
+    let found_in = found_path(d, env);
+    let key_only = if matches!(
+        d.credential.kind,
+        CredentialKind::AwsAccessKey | CredentialKind::AwsSession
+    ) && found_in.file_name().is_some_and(|n| n == "credentials")
+    {
+        Some(aws_key_only_files(d, profile, &found_in)?)
+    } else {
+        None
+    };
+    let binding = match &key_only {
+        Some(dir) => {
+            let mut b = aws_binding(profile, &dir.path.join("credentials"));
+            b.evidence = format!(
+                "aws was bound to the key of profile {profile} in {}: run with --profile, a temporary credentials file holding only that key and an empty config file (no role chain), with any credential, profile or endpoint in the environment removed",
+                found_in.display()
+            );
+            b
+        }
+        None => aws_binding(profile, &found_in),
+    };
     let out = run_bound_ok(
         "aws",
         &["sts", "get-caller-identity", "--output", "json"],
@@ -1004,6 +1029,70 @@ fn verify_aws(
 
 /// Why listing attached policies is not a confirmation of what the
 /// credential can do.
+/// A temporary directory holding a credentials file with only `profile`'s
+/// key (read again from `credentials`) and an empty config file.
+fn aws_key_only_files(
+    d: &Discovered,
+    profile: &str,
+    credentials: &Path,
+) -> Result<EmptyDir, String> {
+    let text = std::fs::read_to_string(credentials)
+        .map_err(|e| format!("cannot read {}: {e}", credentials.display()))?;
+    let ini = super::parsers::parse_ini(&text);
+    let map = ini
+        .iter()
+        .find(|(section, _)| section.trim() == profile)
+        .map(|(_, m)| m)
+        .ok_or_else(|| {
+            format!(
+                "{} no longer holds profile {profile}",
+                credentials.display()
+            )
+        })?;
+    let id = map
+        .get("aws_access_key_id")
+        .ok_or_else(|| format!("profile {profile} no longer holds an access key"))?;
+    // A profile with a role_arn is fingerprinted by the role, so the key
+    // is compared only when the fingerprint is the key's.
+    let role = d.links.iter().any(|l| l.edge == EdgeKind::CanAssumeRole);
+    if !role && Fingerprint::from_public_id(id) != d.credential.fingerprint {
+        return Err(format!(
+            "the key of profile {profile} in {} changed since it was read",
+            credentials.display()
+        ));
+    }
+    let mut body = format!("[{profile}]\n");
+    for name in [
+        "aws_access_key_id",
+        "aws_secret_access_key",
+        "aws_session_token",
+    ] {
+        if let Some(v) = map.get(name) {
+            body.push_str(&format!("{name} = {v}\n"));
+        }
+    }
+    let dir = EmptyDir::create("aws")?;
+    write_private(&dir.path.join("credentials"), &body)?;
+    write_private(&dir.path.join("config"), "")?;
+    Ok(dir)
+}
+
+/// Write a user-only file that must not already exist.
+fn write_private(path: &Path, contents: &str) -> Result<(), String> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options
+        .open(path)
+        .map_err(|e| format!("cannot create a temporary file: {e}"))?;
+    std::io::Write::write_all(&mut file, contents.as_bytes())
+        .map_err(|e| format!("cannot write a temporary file: {e}"))
+}
+
 const AWS_POLICY_NOTE: &str = "attached policies listed, but permission boundaries, service control policies and explicit denies were not evaluated, so effective permissions are not confirmed";
 
 // ─── GitHub ──────────────────────────────────────────────────────────────────
@@ -1020,36 +1109,166 @@ pub struct GhAuthStatus {
     pub fine_grained: bool,
 }
 
-/// Parse `gh auth status` output (either stream; gh has used both).
-pub fn parse_gh_auth_status(text: &str) -> GhAuthStatus {
-    let scopes: Vec<String> = text
-        .lines()
-        .find(|l| l.contains("Token scopes:"))
-        .map(|l| {
-            l.split("Token scopes:")
-                .nth(1)
-                .unwrap_or("")
+/// How gh's check of one account came out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GhOutcome {
+    /// `✓ Logged in to <host> account <login> (<source>)`.
+    LoggedIn,
+    /// `X Failed to log in to …`: the token was rejected.
+    Invalid,
+    /// `X Token for … has expired`.
+    Expired,
+    /// `X Timeout trying to log in to …`.
+    Timeout,
+    /// `X Refresh token for … was rejected`.
+    RefreshRejected,
+}
+
+/// One account block of `gh auth status` output. gh checks every saved
+/// account on a host and prints one block each, so facts are only ever
+/// taken from the block for the credential under test, never merged across
+/// blocks.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GhAccountBlock {
+    pub host: String,
+    /// `None` when gh could not tell whose token it is (`using token`).
+    pub account: Option<String>,
+    /// Where gh read the token: a hosts.yml path, `keyring`, or the name of
+    /// the environment variable (`GH_TOKEN`).
+    pub source: Option<String>,
+    pub active: Option<bool>,
+    pub outcome: GhOutcome,
+    /// Classic OAuth scopes listed in this block.
+    pub scopes: Vec<String>,
+    /// gh showed a `github_pat_` token in this block.
+    pub fine_grained_token: bool,
+}
+
+impl GhAccountBlock {
+    /// What this block established, for [`apply_gh_auth_status`].
+    pub fn status(&self) -> GhAuthStatus {
+        GhAuthStatus {
+            logged_in: self.outcome == GhOutcome::LoggedIn,
+            account: self.account.clone(),
+            fine_grained: self.fine_grained_token || self.scopes.is_empty(),
+            scopes: self.scopes.clone(),
+        }
+    }
+
+    /// The error class of a block that is not logged in, as a failure
+    /// detail; `None` when it is logged in.
+    pub fn failure(&self) -> Option<String> {
+        let who = self.account.as_deref().map_or_else(
+            || {
+                format!(
+                    "the token in {}",
+                    self.source.as_deref().unwrap_or("an unknown source")
+                )
+            },
+            |a| a.to_string(),
+        );
+        Some(match self.outcome {
+            GhOutcome::LoggedIn => return None,
+            GhOutcome::Invalid => format!("gh reported the token for {who} is invalid"),
+            GhOutcome::Expired => format!("gh reported the token for {who} has expired"),
+            GhOutcome::Timeout => format!("gh timed out checking the token for {who}"),
+            GhOutcome::RefreshRejected => {
+                format!("gh reported the refresh token for {who} was rejected")
+            }
+        })
+    }
+}
+
+/// The opening line of an account block: the outcome and the text after
+/// the phrase that names it.
+fn gh_block_start(line: &str) -> Option<(GhOutcome, &str)> {
+    for (phrase, outcome) in [
+        ("Logged in to ", GhOutcome::LoggedIn),
+        ("Failed to log in to ", GhOutcome::Invalid),
+        ("Timeout trying to log in to ", GhOutcome::Timeout),
+        ("Refresh token for ", GhOutcome::RefreshRejected),
+        ("Token for ", GhOutcome::Expired),
+    ] {
+        if let Some(rest) = line.strip_prefix(phrase) {
+            return Some((outcome, rest));
+        }
+    }
+    None
+}
+
+/// Parse `gh auth status` output (either stream; gh has used both) into
+/// one block per account. Lines outside any block are ignored.
+pub fn parse_gh_auth_blocks(text: &str) -> Vec<GhAccountBlock> {
+    let mut blocks: Vec<GhAccountBlock> = Vec::new();
+    let mut header_host = String::new();
+    for raw in text.lines() {
+        if raw.trim().is_empty() {
+            continue;
+        }
+        let indented = raw.starts_with(char::is_whitespace);
+        // Drop gh's status icon or list marker ("✓", "X", "!", "-").
+        let line = raw
+            .trim()
+            .trim_start_matches(|c: char| !c.is_alphanumeric())
+            .trim_start();
+        // gh marks a failed account with a plain "X".
+        let line = line.strip_prefix("X ").unwrap_or(line);
+        if !indented && !raw.trim().contains(' ') {
+            header_host = raw.trim().trim_end_matches(':').to_string();
+            continue;
+        }
+        if let Some((outcome, rest)) = gh_block_start(line) {
+            // "<host> account <login> (<source>)…", "<host> using token
+            // (<source>)", or the older "<host> as <login> (<source>)".
+            let mut words = rest.splitn(2, ' ');
+            let host = words.next().unwrap_or("").to_string();
+            let after = words.next().unwrap_or("");
+            let account = after
+                .strip_prefix("account ")
+                .or_else(|| after.strip_prefix("as "))
+                .and_then(|r| r.split_whitespace().next())
+                .map(|s| s.to_string());
+            let source = match (after.find('('), after.rfind(')')) {
+                (Some(open), Some(close)) if close > open => {
+                    Some(after[open + 1..close].trim().to_string())
+                }
+                _ => None,
+            };
+            blocks.push(GhAccountBlock {
+                host: if host.is_empty() {
+                    header_host.clone()
+                } else {
+                    host
+                },
+                account,
+                source,
+                active: None,
+                outcome,
+                scopes: Vec::new(),
+                fine_grained_token: false,
+            });
+            continue;
+        }
+        let Some(block) = blocks.last_mut() else {
+            continue;
+        };
+        if let Some(v) = line.strip_prefix("Active account:") {
+            block.active = match v.trim() {
+                "true" => Some(true),
+                "false" => Some(false),
+                _ => None,
+            };
+        } else if let Some(v) = line.strip_prefix("Token scopes:") {
+            block.scopes = v
                 .split(',')
                 .map(|s| s.trim().trim_matches('\'').trim_matches('"').to_string())
                 .filter(|s| !s.is_empty() && s != "none")
-                .collect()
-        })
-        .unwrap_or_default();
-    let account = text
-        .lines()
-        .find(|l| l.contains("account "))
-        .and_then(|line| {
-            line.split("account ")
-                .nth(1)
-                .and_then(|r| r.split_whitespace().next())
-                .map(|s| s.to_string())
-        });
-    GhAuthStatus {
-        logged_in: text.contains("Logged in"),
-        account,
-        fine_grained: text.contains("github_pat_") || scopes.is_empty(),
-        scopes,
+                .collect();
+        } else if let Some(v) = line.strip_prefix("Token:") {
+            block.fine_grained_token = v.trim().starts_with("github_pat_");
+        }
     }
+    blocks
 }
 
 /// Apply what `gh auth status` established: who the token is and that it
@@ -1368,6 +1587,15 @@ impl Drop for EmptyDir {
 /// saved credential records.
 const GH_OTHER_ACCOUNT: &str = "provider reported a different account than the saved credential";
 
+/// The detail of a saved login whose hosts.yml entry records no user, so
+/// gh's answer cannot be tied to it.
+const GH_NO_RECORDED_USER: &str =
+    "saved login has no recorded user; cannot confirm it is the same account";
+
+/// The detail of a check gh answered from the keyring while the finding is
+/// the token written in hosts.yml.
+const GH_KEYRING_NOT_FILE: &str = "gh used a keyring token, not the token in hosts.yml";
+
 fn verify_github(
     d: &mut Discovered,
     key: &str,
@@ -1397,14 +1625,18 @@ fn verify_github(
             .unwrap_or(Path::new("")),
     );
     // The account the saved login records, to compare with GitHub's answer.
+    // A saved login with no recorded user cannot be matched to any block.
     let recorded = if key.starts_with("env:") {
         None
     } else {
-        d.credential
-            .permissions
-            .identity
-            .clone()
-            .filter(|u| !u.is_empty() && u != "?")
+        Some(
+            d.credential
+                .permissions
+                .identity
+                .clone()
+                .filter(|u| !u.is_empty() && u != "?")
+                .ok_or_else(|| GH_NO_RECORDED_USER.to_string())?,
+        )
     };
     // gh prints status to stderr on some versions and stdout on others; capture both.
     let output = run_bound(
@@ -1414,18 +1646,55 @@ fn verify_github(
         env,
     )?;
     let text = format!("{}{}", output.stdout, output.stderr);
-    let status = parse_gh_auth_status(&text);
-    if !output.success && !status.logged_in {
-        return Err(format!(
-            "gh auth status exited with an error: {}",
-            redact_text(text.lines().next().unwrap_or("not logged in"))
-        ));
-    }
-    if let (Some(saved), Some(reported)) = (&recorded, &status.account) {
-        if !saved.eq_ignore_ascii_case(reported) {
+    let blocks: Vec<GhAccountBlock> = parse_gh_auth_blocks(&text)
+        .into_iter()
+        .filter(|b| b.host.eq_ignore_ascii_case(&host))
+        .collect();
+    // Only the block for the credential under test counts: the saved
+    // login's user, or the block gh labels with the token's variable.
+    let block = match (&recorded, key.strip_prefix("env:")) {
+        (Some(user), _) => blocks.iter().find(|b| {
+            b.account
+                .as_deref()
+                .is_some_and(|a| a.eq_ignore_ascii_case(user))
+        }),
+        (None, Some(var)) => blocks.iter().find(|b| b.source.as_deref() == Some(var)),
+        (None, None) => None,
+    };
+    let Some(block) = block else {
+        if recorded.is_some() && blocks.iter().any(|b| b.account.is_some()) {
             return Err(GH_OTHER_ACCOUNT.into());
         }
+        if !output.success {
+            return Err(format!(
+                "gh auth status exited with an error: {}",
+                redact_text(text.lines().next().unwrap_or("not logged in"))
+            ));
+        }
+        return Err(match key.strip_prefix("env:") {
+            Some(var) => format!("gh auth status did not report the token in {var}"),
+            None => "gh auth status did not report the saved login".into(),
+        });
+    };
+    if let Some(failure) = block.failure() {
+        return Err(failure);
     }
+    if !output.success {
+        // gh checked other accounts too and one of them failed; its exit
+        // status cannot be attributed, so nothing is confirmed.
+        return Err("gh auth status exited with an error".into());
+    }
+    if recorded.is_some() {
+        let keyring_login = d
+            .credential
+            .evidence
+            .iter()
+            .any(|e| e == super::discover::GH_KEYRING_EVIDENCE);
+        if !keyring_login && block.source.as_deref() == Some("keyring") {
+            return Err(GH_KEYRING_NOT_FILE.into());
+        }
+    }
+    let status = block.status();
     d.credential.evidence.push(binding.evidence.clone());
     apply_gh_auth_status(d, &status, &host);
     // Token scopes are not repository permissions, so nothing gh auth
@@ -2250,13 +2519,28 @@ pub struct DoctlBinding {
 ///   context exists to be selected, `DIGITALOCEAN_CONTEXT` is removed, and
 ///   `DIGITALOCEAN_ACCESS_TOKEN` is set from `VAR` in the child's
 ///   environment. The token is never an argument.
+/// * `config-token:<name>`: the top-level `access-token` or the context
+///   named `default` in the config at `config_path`, which `--context
+///   default` cannot tell apart. doctl runs with `--config <empty_config>`,
+///   here a temporary user-only file holding only that token, with both
+///   variables removed.
 /// * `<context>`: a named context in the doctl config file at
 ///   `config_path`. doctl runs with `--config <config_path> --context
 ///   <context>`, with `DIGITALOCEAN_ACCESS_TOKEN` and `DIGITALOCEAN_CONTEXT`
 ///   removed so nothing in the environment can override the context's
 ///   token.
 pub fn doctl_binding(key: &str, config_path: &Path, empty_config: &Path) -> DoctlBinding {
-    if let Some(var) = key.strip_prefix("env:") {
+    if let Some(name) = key.strip_prefix(super::discover::DOCTL_TOKEN_KEY) {
+        DoctlBinding {
+            args: vec!["--config".into(), empty_config.display().to_string()],
+            env_from: Vec::new(),
+            env_remove: vec![DOCTL_TOKEN_VAR.to_string(), DOCTL_CONTEXT_VAR.to_string()],
+            evidence: format!(
+                "doctl was bound to the {name} token of {}: run with a temporary config holding only that token, with any token in the environment removed",
+                config_path.display()
+            ),
+        }
+    } else if let Some(var) = key.strip_prefix("env:") {
         DoctlBinding {
             args: vec!["--config".into(), empty_config.display().to_string()],
             env_from: vec![(DOCTL_TOKEN_VAR.to_string(), var.to_string())],
@@ -2291,8 +2575,17 @@ struct EmptyConfig {
 
 impl EmptyConfig {
     fn create() -> Result<Self, String> {
+        Self::write("empty", "")
+    }
+
+    /// A user-only temporary doctl config holding `contents`.
+    fn with_contents(contents: &str) -> Result<Self, String> {
+        Self::write("token", contents)
+    }
+
+    fn write(tag: &str, contents: &str) -> Result<Self, String> {
         let path = std::env::temp_dir().join(format!(
-            "gorse-doctl-empty-{}-{}.yaml",
+            "gorse-doctl-{tag}-{}-{}.yaml",
             std::process::id(),
             rand::random::<u64>()
         ));
@@ -2303,10 +2596,13 @@ impl EmptyConfig {
             use std::os::unix::fs::OpenOptionsExt;
             options.mode(0o600);
         }
-        options
+        let mut file = options
             .open(&path)
-            .map_err(|e| format!("cannot create an empty doctl config: {e}"))?;
-        Ok(Self { path })
+            .map_err(|e| format!("cannot create a temporary doctl config: {e}"))?;
+        let config = Self { path };
+        std::io::Write::write_all(&mut file, contents.as_bytes())
+            .map_err(|e| format!("cannot write a temporary doctl config: {e}"))?;
+        Ok(config)
     }
 }
 
@@ -2314,6 +2610,24 @@ impl Drop for EmptyConfig {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.path);
     }
+}
+
+/// The token a doctl config holds under `name`: the top-level
+/// `access-token`, or the context of that name in `auth-contexts`.
+fn doctl_config_token(config: &Path, name: &str) -> Result<String, String> {
+    let text = std::fs::read_to_string(config)
+        .map_err(|e| format!("cannot read {}: {e}", config.display()))?;
+    let y = super::parsers::parse_yaml(&text);
+    let token = if name == super::discover::DOCTL_TOP_LEVEL {
+        y.str("access-token")
+    } else {
+        y.get("auth-contexts").and_then(|c| c.str(name))
+    };
+    token
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| format!("{} no longer holds the {name} token", config.display()))
 }
 
 /// `~/`-relative display paths back to absolute, using the verification
@@ -2351,16 +2665,21 @@ fn verify_digitalocean(
     decl: &super::config::Declarations,
     env: &BTreeMap<String, String>,
 ) -> Result<Checked, String> {
-    let config_path = expand_home(
-        d.credential
-            .location
-            .split(" (")
-            .next()
-            .unwrap_or(&d.credential.location),
-        env,
-    );
+    let config_path = found_path(d, env);
     let empty = if key.starts_with("env:") {
         Some(EmptyConfig::create()?)
+    } else if let Some(name) = key.strip_prefix(super::discover::DOCTL_TOKEN_KEY) {
+        let token = doctl_config_token(&config_path, name)?;
+        if Fingerprint::from_secret(token.as_bytes()) != d.credential.fingerprint {
+            return Err(format!(
+                "the {name} token in {} changed since it was read",
+                config_path.display()
+            ));
+        }
+        Some(EmptyConfig::with_contents(&format!(
+            "access-token: '{}'\n",
+            token.replace('\'', "''")
+        ))?)
     } else {
         None
     };
@@ -2767,15 +3086,30 @@ const AZURE_ROLE_NOTE: &str = "deny assignments, PIM eligibility, conditional ac
 
 fn verify_azure(
     d: &mut Discovered,
-    user: &str,
+    subscription_id: &str,
     decl: &super::config::Declarations,
     env: &BTreeMap<String, String>,
 ) -> Result<Checked, String> {
-    let binding = azure_binding(&d.credential.name, &found_path(d, env));
+    let user = d
+        .credential
+        .permissions
+        .identity
+        .clone()
+        .filter(|u| !u.is_empty() && u != "?")
+        .ok_or("this subscription records no user to check")?;
+    let user = user.as_str();
+    // Bound by the subscription id: display names are not unique.
+    let binding = azure_binding(subscription_id, &found_path(d, env));
     let out = run_bound_ok("az", &["account", "show", "-o", "json"], &binding, env)?;
     let v: serde_json::Value = serde_json::from_str(&out).map_err(|_| "unexpected az output")?;
     if v["user"]["name"].as_str() != Some(user) {
         return Err("active az account differs from this subscription's user".into());
+    }
+    if v["id"]
+        .as_str()
+        .is_some_and(|id| !id.eq_ignore_ascii_case(subscription_id))
+    {
+        return Err("az answered for a different subscription".into());
     }
     d.credential.evidence.push(binding.evidence.clone());
     // `az account show` reads the local profile (~/.azure): Azure was not
@@ -2783,7 +3117,7 @@ fn verify_azure(
     let local = || {
         Checked::new(
             VerificationStatus::LocalConfig,
-            "az account show: subscription configured locally; Azure was not asked (role assignments not readable)",
+            "az account show read local configuration; az role assignment list failed, so Azure was not asked",
         )
     };
     let Ok(out) = run_bound_ok(
@@ -2980,6 +3314,7 @@ esac"#,
             ),
             links: Vec::new(),
             verify_key: Some("staging".into()),
+            source: None,
         };
         verify_digitalocean(&mut d, "staging", &decl, &env).unwrap();
         let p = &d.credential.permissions;
@@ -3146,6 +3481,7 @@ esac"#,
             ),
             links: Vec::new(),
             verify_key: Some("env:DIGITALOCEAN_TOKEN".into()),
+            source: None,
         };
         env.insert("DIGITALOCEAN_TOKEN".into(), "dop_v1_fixture".into());
         // A saved context in the environment must not be able to answer
@@ -3272,14 +3608,9 @@ esac"#,
 esac"#,
         );
         let mut d = Discovered {
-            credential: DiscoveredCredential::new(
-                CredentialKind::AwsAccessKey,
-                "default",
-                "~/.aws/credentials",
-                "AWS",
-            ),
-            links: vec![],
             verify_key: None,
+            source: Some(aws_fixture_file(&dir)),
+            ..aws_fixture()
         };
         verify_aws(
             &mut d,
@@ -3338,6 +3669,7 @@ esac"#,
                 Assurance::Inferred,
             )],
             verify_key: None,
+            source: None,
         };
         verify_vault(&mut d, &env).unwrap();
         assert_eq!(d.credential.permissions.assurance, Assurance::Confirmed);
@@ -3380,6 +3712,7 @@ esac"#,
             ),
             links: vec![],
             verify_key: None,
+            source: None,
         };
         d.credential.permissions.assurance = Assurance::Inferred;
         verify_gcloud(&mut d, "alice@example.com", &fake_env(&dir)).unwrap();
@@ -3439,14 +3772,28 @@ configmaps                                      []                  []          
   - Token scopes: none
 ";
 
+    /// The status of the one account block in `text`.
+    fn parse_gh_auth_status(text: &str) -> GhAuthStatus {
+        let blocks = parse_gh_auth_blocks(text);
+        assert_eq!(blocks.len(), 1, "{blocks:?}");
+        blocks[0].status()
+    }
+
+    /// A login saved for alice with its token in the keyring, as the
+    /// `(keyring)` fixtures above report it.
     fn github_fixture() -> Discovered {
+        let mut credential = DiscoveredCredential::new(
+            CredentialKind::GitHubToken,
+            "gh login github.com",
+            "~/.config/gh/hosts.yml",
+            "github.com",
+        );
+        credential.permissions.identity = Some("alice".into());
+        credential
+            .evidence
+            .push(super::super::discover::GH_KEYRING_EVIDENCE.into());
         Discovered {
-            credential: DiscoveredCredential::new(
-                CredentialKind::GitHubToken,
-                "gh login github.com",
-                "~/.config/gh/hosts.yml",
-                "github.com",
-            ),
+            credential,
             links: vec![
                 Link::new(
                     NodeKind::Repository,
@@ -3463,6 +3810,7 @@ configmaps                                      []                  []          
                 .production(true),
             ],
             verify_key: Some("github.com".into()),
+            source: None,
         }
     }
 
@@ -3486,8 +3834,7 @@ configmaps                                      []                  []          
         assert!(f.scopes.is_empty(), "'none' is not a scope");
         assert!(f.fine_grained);
 
-        let none = parse_gh_auth_status("You are not logged into any GitHub hosts.");
-        assert!(!none.logged_in);
+        assert!(parse_gh_auth_blocks("You are not logged into any GitHub hosts.").is_empty());
     }
 
     #[test]
@@ -3936,6 +4283,7 @@ configmaps                                      []                  []          
                 .production(true),
             ],
             verify_key: Some("prod".into()),
+            source: None,
         };
         d.credential.permissions.administrative = Capability::Yes; // name-based guess
         d
@@ -4263,25 +4611,44 @@ configmaps                                      []                  []          
         assert_eq!(deploy[0].scope.as_deref(), Some("namespace payments"));
     }
 
-    #[cfg(unix)]
+    /// The synthetic access key id the AWS fixtures hold.
+    const AWS_FIXTURE_KEY: &str = "AKIAFIXTUREFIXTURE00";
+
     fn aws_fixture() -> Discovered {
+        let mut credential = DiscoveredCredential::new(
+            CredentialKind::AwsAccessKey,
+            "default",
+            "~/.aws/credentials",
+            "AWS",
+        );
+        credential.fingerprint = Fingerprint::from_public_id(AWS_FIXTURE_KEY);
         Discovered {
-            credential: DiscoveredCredential::new(
-                CredentialKind::AwsAccessKey,
-                "default",
-                "~/.aws/credentials",
-                "AWS",
-            ),
+            credential,
             links: vec![],
             verify_key: Some("default".into()),
+            source: None,
         }
+    }
+
+    /// Write a credentials file holding the fixture key as profile
+    /// `default` in `dir`, and return its path.
+    fn aws_fixture_file(dir: &Path) -> PathBuf {
+        let path = dir.join("credentials");
+        std::fs::write(
+            &path,
+            format!("[default]\naws_access_key_id = {AWS_FIXTURE_KEY}\naws_secret_access_key = synthetic\n"),
+        )
+        .unwrap();
+        path
     }
 
     #[cfg(unix)]
     fn verify_one(script: &str, tag: &str) -> (Verification, Discovered, Vec<String>) {
         let dir = temp_tools(tag);
         fake_tool(&dir, "aws", script);
-        let mut found = vec![aws_fixture()];
+        let mut fixture = aws_fixture();
+        fixture.source = Some(aws_fixture_file(&dir));
+        let mut found = vec![fixture];
         let outcome = verify_all(
             &mut found,
             &crate::exposure::config::Declarations::default(),
@@ -4349,6 +4716,7 @@ esac"#,
                 ),
                 links: vec![],
                 verify_key: None,
+                source: None,
             },
             Discovered {
                 verify_key: None,
@@ -4420,6 +4788,7 @@ esac"#,
                 Assurance::Inferred,
             )],
             verify_key: Some("alice@example.com".into()),
+            source: None,
         }];
         found[0].credential.permissions.assurance = Assurance::Inferred;
         let outcome = verify_all(
@@ -4485,6 +4854,7 @@ esac"#,
 esac"#,
         );
         let mut d = aws_fixture();
+        d.source = Some(aws_fixture_file(&dir));
         d.links.push(
             Link::new(
                 NodeKind::ProductionService,
@@ -4539,6 +4909,7 @@ esac"#,
                 Assurance::Confirmed,
             )],
             verify_key: None,
+            source: None,
         };
         for (status, edge, cred) in [
             (
@@ -4699,6 +5070,7 @@ esac"#,
                 Assurance::Inferred,
             )],
             verify_key: Some("deploy".into()),
+            source: None,
         }];
         found[0].credential.permissions.assurance = Assurance::Inferred;
         found[0].credential.permissions.can_assume_role = Capability::Yes;
@@ -4739,29 +5111,47 @@ esac"#,
         assert_eq!(score(&found).confidence, Assurance::Inferred);
     }
 
+    /// The subscription id the Azure fixtures use.
+    #[cfg(unix)]
+    const AZURE_SUB: &str = "00000000-0000-0000-0000-00000000beef";
+
     #[cfg(unix)]
     fn azure_case(roles: &str, tag: &str) -> (Verification, Discovered) {
+        let (v, d, _) = azure_case_with(&format!("echo '{roles}'"), tag);
+        (v, d)
+    }
+
+    /// Run the Azure check against a stand-in az whose role assignment
+    /// listing runs `role_list`; returns the arguments of every call too.
+    #[cfg(unix)]
+    fn azure_case_with(role_list: &str, tag: &str) -> (Verification, Discovered, String) {
         let dir = temp_tools(tag);
+        let log = dir.join("az.log");
         fake_tool(
             &dir,
             "az",
             &format!(
-                r#"case "$*" in
-  *"account show"*) echo '{{"name":"Production","user":{{"name":"alice@example.com","type":"user"}}}}';;
-  *"role assignment list"*) echo '{roles}';;
+                r#"echo "$*" >> '{}'
+case "$*" in
+  *"account show"*) echo '{{"id":"{AZURE_SUB}","name":"Production","user":{{"name":"alice@example.com","type":"user"}}}}';;
+  *"role assignment list"*) {role_list};;
   *) exit 1;;
-esac"#
+esac"#,
+                log.display()
             ),
         );
+        let mut credential = DiscoveredCredential::new(
+            CredentialKind::AzureSession,
+            &format!("Production ({AZURE_SUB})"),
+            "~/.azure/azureProfile.json",
+            "Azure",
+        );
+        credential.permissions.identity = Some("alice@example.com".into());
         let mut found = vec![Discovered {
-            credential: DiscoveredCredential::new(
-                CredentialKind::AzureSession,
-                "Production",
-                "~/.azure/azureProfile.json",
-                "Azure",
-            ),
+            credential,
             links: vec![],
-            verify_key: Some("alice@example.com".into()),
+            verify_key: Some(AZURE_SUB.into()),
+            source: Some(dir.join("azureProfile.json")),
         }];
         // As discovery leaves it: production inferred from the subscription name.
         found[0].credential.permissions.assurance = Assurance::Inferred;
@@ -4771,8 +5161,46 @@ esac"#
             &crate::exposure::config::Declarations::default(),
             &fake_env(&dir),
         );
+        let calls = std::fs::read_to_string(&log).unwrap_or_default();
         let _ = std::fs::remove_dir_all(&dir);
-        (outcome.verifications[0].clone(), found.remove(0))
+        (outcome.verifications[0].clone(), found.remove(0), calls)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn azure_is_bound_by_subscription_id_not_display_name() {
+        let (v, d, calls) = azure_case_with("echo '[]'", "az-by-id");
+        assert_eq!(v.status, VerificationStatus::IdentityConfirmed, "{v:?}");
+        assert!(
+            d.credential.name.contains(AZURE_SUB),
+            "{}",
+            d.credential.name
+        );
+        for call in calls.lines() {
+            assert!(
+                call.contains(&format!("--subscription {AZURE_SUB}")),
+                "{call}"
+            );
+            assert!(!call.contains("--subscription Production"), "{call}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn azure_account_show_alone_is_local_configuration() {
+        // az account show reads ~/.azure only; with the role assignment
+        // listing failing, Azure was never asked.
+        let (v, d, _) = azure_case_with("echo 'AADSTS700082 expired' >&2; exit 1", "az-local");
+        assert_eq!(v.status, VerificationStatus::LocalConfig, "{v:?}");
+        assert_eq!(
+            v.detail,
+            "az account show read local configuration; az role assignment list failed, so Azure was not asked"
+        );
+        let p = &d.credential.permissions;
+        assert_ne!(p.assurance, Assurance::Confirmed);
+        assert!(p.confirmed.is_empty(), "{:?}", p.confirmed);
+        assert_ne!(p.revoked, Capability::No);
+        assert!(d.links.iter().all(|l| l.assurance != Assurance::Confirmed));
     }
 
     #[cfg(unix)]
@@ -4826,12 +5254,12 @@ esac"#
     #[cfg(unix)]
     const GH_ALICE_BOB: &str = r#"echo "GH_CONFIG_DIR=$GH_CONFIG_DIR" >> "$GH_LOG"
 [ -f "$GH_CONFIG_DIR/hosts.yml" ] && echo "hosts-present" >> "$GH_LOG"
-if [ -n "$GH_TOKEN" ]; then acct=$GH_TOKEN
-elif [ -n "$GITHUB_TOKEN" ]; then acct=$GITHUB_TOKEN
-elif [ -f "$GH_CONFIG_DIR/hosts.yml" ]; then acct=$(sed -n 's/^ *user: *//p' "$GH_CONFIG_DIR/hosts.yml" | head -n 1)
+if [ -n "$GH_TOKEN" ]; then acct=$GH_TOKEN; src=GH_TOKEN
+elif [ -n "$GITHUB_TOKEN" ]; then acct=$GITHUB_TOKEN; src=GITHUB_TOKEN
+elif [ -f "$GH_CONFIG_DIR/hosts.yml" ]; then acct=$(sed -n 's/^ *user: *//p' "$GH_CONFIG_DIR/hosts.yml" | head -n 1); src="$GH_CONFIG_DIR/hosts.yml"
 else echo "You are not logged into any GitHub hosts." >&2; exit 1
 fi
-printf 'github.com\n  Logged in to github.com account %s (keyring)\n  Token: gho_****\n  Token scopes: '"'"'repo'"'"'\n' "$acct" >&2"#;
+printf 'github.com\n  Logged in to github.com account %s (%s)\n  Token: gho_****\n  Token scopes: '"'"'repo'"'"'\n' "$acct" "$src" >&2"#;
 
     #[cfg(unix)]
     #[test]
@@ -4865,6 +5293,7 @@ printf 'github.com\n  Logged in to github.com account %s (keyring)\n  Token: gho
             ),
             links: vec![],
             verify_key: None,
+            source: None,
         };
         let mut found = vec![saved, env_token];
         let outcome = verify_all(
@@ -5145,6 +5574,7 @@ printf 'github.com\n  Logged in to github.com account %s (keyring)\n  Token: gho
             ),
             links: vec![],
             verify_key: None,
+            source: None,
         };
         assert_eq!(fallback_key(&d).as_deref(), Some("env:GH_TOKEN"));
         let other = Discovered {
@@ -5156,7 +5586,412 @@ printf 'github.com\n  Logged in to github.com account %s (keyring)\n  Token: gho
             ),
             links: vec![],
             verify_key: None,
+            source: None,
         };
         assert_eq!(fallback_key(&other), None);
+    }
+
+    // ── gh auth status: one block per account ──
+
+    /// Real `gh auth status` output (gh 2.87.3) with two saved accounts:
+    /// active alice, whose token was rejected, and inactive bob, whose
+    /// token was accepted. gh exits 1. From the 0.4.9 audit, with the
+    /// temporary path replaced.
+    const GH_TWO_ACCOUNTS: &str = "github.com
+  X Failed to log in to github.com account alice (/tmp/gh-fixture/hosts.yml)
+  - Active account: true
+  - The token in /tmp/gh-fixture/hosts.yml is invalid.
+  - To re-authenticate, run: gh auth login -h github.com
+  - To forget about this account, run: gh auth logout -h github.com -u alice
+
+  ✓ Logged in to github.com account bob (/tmp/gh-fixture/hosts.yml)
+  - Active account: false
+  - Git operations protocol: https
+  - Token: ghp_synthetic_***
+  - Token scopes: 'repo', 'workflow', 'read:org', 'gist'
+";
+
+    #[test]
+    fn gh_status_is_split_into_one_block_per_account() {
+        let blocks = parse_gh_auth_blocks(GH_TWO_ACCOUNTS);
+        assert_eq!(blocks.len(), 2, "{blocks:?}");
+        let (alice, bob) = (&blocks[0], &blocks[1]);
+        assert_eq!(alice.host, "github.com");
+        assert_eq!(alice.account.as_deref(), Some("alice"));
+        assert_eq!(alice.source.as_deref(), Some("/tmp/gh-fixture/hosts.yml"));
+        assert_eq!(alice.active, Some(true));
+        assert_eq!(alice.outcome, GhOutcome::Invalid);
+        assert!(alice.scopes.is_empty(), "bob's scopes are not alice's");
+        assert_eq!(
+            alice.failure().as_deref(),
+            Some("gh reported the token for alice is invalid")
+        );
+        assert_eq!(bob.account.as_deref(), Some("bob"));
+        assert_eq!(bob.active, Some(false));
+        assert_eq!(bob.outcome, GhOutcome::LoggedIn);
+        assert_eq!(bob.scopes, ["repo", "workflow", "read:org", "gist"]);
+        assert!(bob.failure().is_none());
+
+        let env = parse_gh_auth_blocks(
+            "github.com\n  X Failed to log in to github.com using token (GH_TOKEN)\n  - Active account: true\n  - The token in GH_TOKEN is invalid.\n",
+        );
+        assert_eq!(env.len(), 1);
+        assert_eq!(env[0].account, None);
+        assert_eq!(env[0].source.as_deref(), Some("GH_TOKEN"));
+        assert_eq!(
+            env[0].failure().as_deref(),
+            Some("gh reported the token for the token in GH_TOKEN is invalid")
+        );
+    }
+
+    /// Run the GitHub check for a saved login of `user` against a stand-in
+    /// gh that prints `output` and exits with `code`.
+    #[cfg(unix)]
+    fn gh_case(tag: &str, output: &str, code: i32, user: &str) -> (Verification, Discovered) {
+        let dir = temp_tools(tag);
+        std::fs::write(dir.join("status.txt"), output).unwrap();
+        fake_tool(
+            &dir,
+            "gh",
+            &format!(
+                "cat '{}' >&2; exit {code}",
+                dir.join("status.txt").display()
+            ),
+        );
+        let mut env = fake_env(&dir);
+        env.insert("PATH".into(), format!("{}:/usr/bin:/bin", dir.display()));
+        let mut d = github_fixture();
+        d.credential.permissions.identity = Some(user.into());
+        d.credential.evidence.clear();
+        d.credential.fingerprint = Fingerprint::from_secret(b"synthetic-hosts-token");
+        d.source = Some(dir.join("hosts.yml"));
+        let mut found = vec![d];
+        let outcome = verify_all(
+            &mut found,
+            &crate::exposure::config::Declarations::default(),
+            &env,
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+        (outcome.verifications[0].clone(), found.remove(0))
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_rejected_github_login_is_never_confirmed_by_another_account() {
+        // The audit's case: alice's token rejected, bob's accepted, exit 1.
+        let (v, d) = gh_case("gh-two-alice", GH_TWO_ACCOUNTS, 1, "alice");
+        assert_eq!(v.status, VerificationStatus::Failed, "{v:?}");
+        assert_eq!(v.detail, "gh reported the token for alice is invalid");
+        let p = &d.credential.permissions;
+        assert_ne!(p.revoked, Capability::No);
+        assert_ne!(p.assurance, Assurance::Confirmed);
+        assert!(
+            p.scope.iter().all(|s| !s.contains("repo")),
+            "bob's scopes attached to alice: {:?}",
+            p.scope
+        );
+        assert_eq!(p.identity.as_deref(), Some("alice"));
+
+        // Bob's own block is logged in, but gh exited 1 because another
+        // account failed: nothing is confirmed.
+        let (v, d) = gh_case("gh-two-bob", GH_TWO_ACCOUNTS, 1, "bob");
+        assert_eq!(v.status, VerificationStatus::Failed, "{v:?}");
+        assert_ne!(d.credential.permissions.revoked, Capability::No);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_single_github_account_succeeds_or_fails_on_its_own_block() {
+        let ok = "github.com\n  ✓ Logged in to github.com account alice (/tmp/gh-fixture/hosts.yml)\n  - Active account: true\n  - Git operations protocol: https\n  - Token: gho_****\n  - Token scopes: 'repo'\n";
+        let (v, d) = gh_case("gh-one-ok", ok, 0, "alice");
+        assert_eq!(v.status, VerificationStatus::IdentityConfirmed, "{v:?}");
+        assert_eq!(d.credential.permissions.revoked, Capability::No);
+        assert_eq!(d.credential.permissions.scope, ["scope repo"]);
+
+        let bad = "github.com\n  X Failed to log in to github.com account alice (/tmp/gh-fixture/hosts.yml)\n  - Active account: true\n  - The token in /tmp/gh-fixture/hosts.yml is invalid.\n";
+        let (v, d) = gh_case("gh-one-bad", bad, 1, "alice");
+        assert_eq!(v.status, VerificationStatus::Failed, "{v:?}");
+        assert_eq!(v.detail, "gh reported the token for alice is invalid");
+        assert_ne!(d.credential.permissions.revoked, Capability::No);
+
+        // A token read from the keyring is not the token in hosts.yml.
+        let keyring = "github.com\n  ✓ Logged in to github.com account alice (keyring)\n  - Active account: true\n  - Token: gho_****\n  - Token scopes: 'repo'\n";
+        let (v, _) = gh_case("gh-one-keyring", keyring, 0, "alice");
+        assert_eq!(v.status, VerificationStatus::Failed, "{v:?}");
+        assert_eq!(
+            v.detail,
+            "gh used a keyring token, not the token in hosts.yml"
+        );
+
+        // hosts.yml recorded no user: gh's answer cannot be tied to it.
+        let (v, _) = gh_case("gh-one-nouser", ok, 0, "?");
+        assert_eq!(v.status, VerificationStatus::Failed, "{v:?}");
+        assert_eq!(
+            v.detail,
+            "saved login has no recorded user; cannot confirm it is the same account"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_environment_github_token_takes_only_the_block_gh_labels_with_its_variable() {
+        let dir = temp_tools("gh-env-block");
+        // A saved login answers too; only the GH_TOKEN block counts, and it
+        // failed.
+        let output = "github.com\n  X Failed to log in to github.com using token (GH_TOKEN)\n  - Active account: true\n  - The token in GH_TOKEN is invalid.\n\n  ✓ Logged in to github.com account bob (/tmp/gh-fixture/hosts.yml)\n  - Active account: false\n  - Token scopes: 'repo'\n";
+        std::fs::write(dir.join("status.txt"), output).unwrap();
+        fake_tool(
+            &dir,
+            "gh",
+            &format!("cat '{}' >&2; exit 1", dir.join("status.txt").display()),
+        );
+        let mut env = fake_env(&dir);
+        env.insert("PATH".into(), format!("{}:/usr/bin:/bin", dir.display()));
+        env.insert("GH_TOKEN".into(), "synthetic".into());
+        let mut found = vec![Discovered {
+            credential: DiscoveredCredential::new(
+                CredentialKind::GitHubToken,
+                "GH_TOKEN",
+                "env GH_TOKEN",
+                "github.com",
+            ),
+            links: vec![],
+            verify_key: None,
+            source: None,
+        }];
+        let outcome = verify_all(
+            &mut found,
+            &crate::exposure::config::Declarations::default(),
+            &env,
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+        let v = &outcome.verifications[0];
+        assert_eq!(v.status, VerificationStatus::Failed, "{v:?}");
+        assert_eq!(
+            v.detail,
+            "gh reported the token for the token in GH_TOKEN is invalid"
+        );
+        assert!(found[0].credential.permissions.scope.is_empty());
+        assert_ne!(found[0].credential.permissions.revoked, Capability::No);
+    }
+
+    // ── Paths come from discovery, never from the display location ──
+
+    #[cfg(unix)]
+    #[test]
+    fn a_parenthesised_kubeconfig_name_is_verified_against_that_file_only() {
+        // KUBECONFIG names `config (production).yaml`; a different file
+        // called `config` beside it has a context of the same name. The
+        // production file's credential is rejected; the other would answer
+        // with administrative rights if it were ever consulted.
+        let dir = temp_tools("kube-paren-path");
+        let intended = dir.join("config (production).yaml");
+        let other = dir.join("config");
+        let config = |token: &str| {
+            format!(
+                "apiVersion: v1\nkind: Config\ncurrent-context: prod\nclusters:\n  - name: prod\n    cluster:\n      server: https://cluster.invalid\nusers:\n  - name: operator\n    user:\n      token: {token}\ncontexts:\n  - name: prod\n    context:\n      cluster: prod\n      user: operator\n      namespace: default\n"
+            )
+        };
+        std::fs::write(&intended, config("synthetic-production-token")).unwrap();
+        std::fs::write(&other, config("synthetic-other-token")).unwrap();
+        fake_tool(
+            &dir,
+            "kubectl",
+            r#"command="$*"
+while [ "$#" -gt 0 ]; do
+ if [ "$1" = '--kubeconfig' ]; then shift; selected="$1"; fi
+ shift
+done
+printf '%s\n' "$selected" >> "$CALLS"
+case "$selected" in *' (production).yaml') echo 'production credential rejected' >&2; exit 1;; esac
+case "$command" in
+ 'get namespaces'*) echo default;;
+ 'auth can-i --list'*) printf 'Resources Non-Resource URLs Resource Names Verbs\n*.* [] [] [*]\n';;
+ 'auth can-i '*) echo yes;;
+ *) echo default;;
+esac"#,
+        );
+        let calls = dir.join("calls.txt");
+        let mut env = fake_env(&dir);
+        env.insert("PATH".into(), format!("{}:/usr/bin:/bin", dir.display()));
+        env.insert("HOME".into(), dir.display().to_string());
+        env.insert("KUBECONFIG".into(), intended.display().to_string());
+        env.insert("CALLS".into(), calls.display().to_string());
+        let decl = crate::exposure::config::Declarations::default();
+        let mut ctx = crate::exposure::discover::Context {
+            home: dir.clone(),
+            cwd: dir.clone(),
+            env: env.clone(),
+            decl: &decl,
+            now: 1,
+            notes: vec![],
+            coverage_failures: vec![],
+            source_unavailable: None,
+        };
+        let mut found: Vec<_> = crate::exposure::discover::discover_all(&mut ctx)
+            .into_iter()
+            .filter(|d| d.credential.kind == CredentialKind::KubernetesContext)
+            .collect();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].source.as_deref(), Some(intended.as_path()));
+        let outcome = verify_all(&mut found, &decl, &env);
+        let selected = std::fs::read_to_string(&calls).unwrap_or_default();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(!selected.is_empty());
+        for line in selected.lines() {
+            assert_eq!(line, intended.display().to_string(), "{selected}");
+        }
+        let v = &outcome.verifications[0];
+        assert_eq!(v.status, VerificationStatus::Failed, "{v:?}");
+        assert_ne!(
+            found[0].credential.permissions.administrative,
+            Capability::Yes
+        );
+    }
+
+    // ── Each credential bound to itself ──
+
+    #[cfg(unix)]
+    #[test]
+    fn doctl_top_level_token_and_default_context_are_each_checked_with_only_their_token() {
+        let dir = temp_tools("doctl-top-level");
+        let home = dir.join("home");
+        std::fs::create_dir_all(home.join(".config/doctl")).unwrap();
+        std::fs::write(
+            home.join(".config/doctl/config.yaml"),
+            "access-token: dop_v1_top\ncontext: default\nauth-contexts:\n  default: dop_v1_ctx\n",
+        )
+        .unwrap();
+        let log = dir.join("doctl.log");
+        // Record which token each call could see: the access-token of the
+        // config it was given.
+        fake_tool(
+            &dir,
+            "doctl",
+            &format!(
+                r#"while [ "$#" -gt 0 ]; do
+ if [ "$1" = '--config' ]; then shift; cfg="$1"; fi
+ if [ "$1" = '--context' ]; then echo "context $2" >> '{log}'; fi
+ shift
+done
+echo "token $(sed -n 's/^access-token: *//p' "$cfg") lines $(grep -c . "$cfg")" >> '{log}'
+echo '{{"email":"a@example.com","uuid":"u","status":"active"}}'"#,
+                log = log.display()
+            ),
+        );
+        let mut env = fake_env(&dir);
+        env.insert("PATH".into(), format!("{}:/usr/bin:/bin", dir.display()));
+        env.insert("HOME".into(), home.display().to_string());
+        let decl = crate::exposure::config::Declarations::default();
+        let mut ctx = crate::exposure::discover::Context {
+            home: home.clone(),
+            cwd: home.clone(),
+            env: env.clone(),
+            decl: &decl,
+            now: 1,
+            notes: vec![],
+            coverage_failures: vec![],
+            source_unavailable: None,
+        };
+        let mut found: Vec<_> = crate::exposure::discover::discover_all(&mut ctx)
+            .into_iter()
+            .filter(|d| d.credential.kind == CredentialKind::DigitalOceanToken)
+            .collect();
+        let names: Vec<&str> = found.iter().map(|d| d.credential.name.as_str()).collect();
+        assert_eq!(
+            names,
+            ["default", "auth-contexts default"],
+            "distinct names"
+        );
+        let keys: Vec<_> = found.iter().map(|d| d.verify_key.clone()).collect();
+        assert_ne!(keys[0], keys[1]);
+        for i in 0..found.len() {
+            let _ = std::fs::remove_file(&log);
+            verify_all(&mut found[i..=i], &decl, &env);
+            let calls = std::fs::read_to_string(&log).unwrap_or_default();
+            let want = if i == 0 { "dop_v1_top" } else { "dop_v1_ctx" };
+            assert!(!calls.is_empty());
+            for line in calls.lines() {
+                assert!(
+                    line == format!("token '{want}' lines 1"),
+                    "{}: {calls}",
+                    found[i].credential.name
+                );
+            }
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_aws_key_is_checked_without_the_role_chain_of_the_same_profile() {
+        // [foo] holds a key in credentials; [profile foo] in config assumes
+        // a role from it. `aws --profile foo` would answer for the role.
+        let dir = temp_tools("aws-key-only");
+        let home = dir.join("home");
+        std::fs::create_dir_all(home.join(".aws")).unwrap();
+        std::fs::write(
+            home.join(".aws/credentials"),
+            "[foo]\naws_access_key_id = AKIAFOOFOOFOOFOOFOO0\naws_secret_access_key = synthetic\n[bar]\naws_access_key_id = AKIABARBARBARBARBAR0\naws_secret_access_key = other\n",
+        )
+        .unwrap();
+        std::fs::write(
+            home.join(".aws/config"),
+            "[profile foo]\nrole_arn = arn:aws:iam::123456789012:role/Admin\nsource_profile = bar\n",
+        )
+        .unwrap();
+        let log = dir.join("aws.log");
+        fake_tool(
+            &dir,
+            "aws",
+            &format!(
+                r#"{{ echo "args $*"; echo "endpoint ${{AWS_ENDPOINT_URL:-none}} ${{AWS_ENDPOINT_URL_STS:-none}}"; echo "config $(grep -c . "$AWS_CONFIG_FILE")"; echo "creds $(tr '\n' '|' < "$AWS_SHARED_CREDENTIALS_FILE")"; }} >> '{}'
+echo '{{"Arn":"arn:aws:iam::123456789012:user/foo","Account":"123456789012"}}'"#,
+                log.display()
+            ),
+        );
+        let mut env = fake_env(&dir);
+        env.insert("PATH".into(), format!("{}:/usr/bin:/bin", dir.display()));
+        env.insert("HOME".into(), home.display().to_string());
+        env.insert("AWS_ENDPOINT_URL".into(), "https://evil.invalid".into());
+        env.insert("AWS_ENDPOINT_URL_STS".into(), "https://evil.invalid".into());
+        let decl = crate::exposure::config::Declarations::default();
+        let mut ctx = crate::exposure::discover::Context {
+            home: home.clone(),
+            cwd: home.clone(),
+            env: env.clone(),
+            decl: &decl,
+            now: 1,
+            notes: vec![],
+            coverage_failures: vec![],
+            source_unavailable: None,
+        };
+        let mut found: Vec<_> = crate::exposure::discover::discover_all(&mut ctx)
+            .into_iter()
+            .filter(|d| d.credential.name == "foo")
+            .collect();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].credential.kind, CredentialKind::AwsAccessKey);
+        let outcome = verify_all(&mut found, &decl, &env);
+        let calls = std::fs::read_to_string(&log).unwrap_or_default();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(
+            outcome.verifications[0].status,
+            VerificationStatus::IdentityConfirmed,
+            "{:?} {calls}",
+            outcome.verifications
+        );
+        assert!(calls.contains("args sts get-caller-identity"), "{calls}");
+        assert!(calls.contains("--profile foo"), "{calls}");
+        assert!(calls.contains("endpoint none none"), "{calls}");
+        assert!(calls.contains("config 0"), "no role chain: {calls}");
+        assert!(calls.contains("AKIAFOOFOOFOOFOOFOO0"), "{calls}");
+        assert!(!calls.contains("AKIABARBARBARBARBAR0"), "{calls}");
+    }
+
+    #[test]
+    fn aws_binding_strips_every_endpoint_override() {
+        let b = aws_binding("default", Path::new("credentials"));
+        assert!(b.remove_prefixes.iter().any(|p| p == "AWS_ENDPOINT_URL"));
     }
 }

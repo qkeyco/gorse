@@ -48,6 +48,45 @@ struct ScheduleRun: Codable, Hashable, Identifiable {
 
     var id: String { "\(at ?? "")|\(trigger ?? "")|\(ok.map(String.init) ?? "")" }
     var date: Date? { ScheduleDates.parse(at) }
+
+    /// What the run established. Incomplete wins over everything: a run
+    /// that could not read some locations never reads as a clean result,
+    /// whatever `ok` or the counts say. `gorse schedule history --json`
+    /// omits `ok` and carries `incomplete` instead, so a missing `ok` is
+    /// unknown, and only an explicit `ok: true` or `incomplete: false`
+    /// lets a run with no findings say "no findings".
+    var outcome: ScheduleRunOutcome {
+        if incomplete == true {
+            return .incomplete(notRead: coverage_failures ?? 0, notAssessed: unassessedCount)
+        }
+        if ok == false { return .failed }
+        let total = counts?.total ?? 0
+        if total > 0 { return .findings(total) }
+        if ok == true || incomplete == false { return .clean }
+        return .unknown
+    }
+
+    /// "incomplete: 1 location not read · 2 not assessed", or nil when the
+    /// run was not incomplete.
+    var incompleteSummary: String? {
+        guard case let .incomplete(notRead, notAssessed) = outcome else { return nil }
+        var text = "incomplete: \(notRead) location\(notRead == 1 ? "" : "s") not read"
+        if notAssessed > 0 { text += " · \(notAssessed) not assessed" }
+        return text
+    }
+}
+
+enum ScheduleRunOutcome: Equatable {
+    /// Some locations were not read (and maybe some findings not reassessed).
+    case incomplete(notRead: Int, notAssessed: Int)
+    /// The run itself failed (`ok: false` without `incomplete`).
+    case failed
+    /// Complete or not, the run found this many things.
+    case findings(Int)
+    /// A complete run with no findings.
+    case clean
+    /// Neither `ok` nor `incomplete` said how the run went (an older CLI).
+    case unknown
 }
 
 struct ScheduleStatus: Codable {
@@ -211,15 +250,30 @@ final class ScheduleModel: ObservableObject {
         } else {
             parts.append("Last check")
         }
-        if run.ok == false {
+        switch run.outcome {
+        case .failed:
             parts.append("did not complete")
-        } else {
+        case .incomplete:
+            parts.append(run.incompleteSummary ?? "incomplete")
+            let total = run.counts?.total ?? 0
+            if total > 0 { parts.append("\(total) finding\(total == 1 ? "" : "s") so far") }
+        case .unknown:
+            parts.append("result unknown")
+        case .findings, .clean:
             let total = run.counts?.total ?? 0
             parts.append("\(total) finding\(total == 1 ? "" : "s")")
             parts.append("\(run.new ?? 0) new / \(run.worsened ?? 0) worsened")
             if run.unassessedCount > 0 { parts.append("\(run.unassessedCount) not assessed") }
         }
         return parts.joined(separator: " · ")
+    }
+
+    /// The last-run line needs attention: the run failed or was incomplete.
+    var lastRunNeedsAttention: Bool {
+        switch status?.last_run?.outcome {
+        case .failed?, .incomplete?: return true
+        default: return false
+        }
     }
 
     /// Something the user must fix before scheduled checks will run.
@@ -329,9 +383,10 @@ struct ScheduleCard: View {
             HStack(spacing: 10) {
                 Text(model.lastRunLine ?? "Not run yet")
                     .font(.caption)
-                    .foregroundStyle(model.lastRunLine == nil ? .tertiary : .secondary)
+                    .foregroundStyle(model.lastRunLine == nil ? AnyShapeStyle(.tertiary)
+                        : model.lastRunNeedsAttention ? AnyShapeStyle(Color.orange) : AnyShapeStyle(.secondary))
                     .lineLimit(1)
-                if let run = model.status?.last_run, run.ok == false, let message = run.message, !message.isEmpty {
+                if let run = model.status?.last_run, run.outcome == .failed, let message = run.message, !message.isEmpty {
                     Text(message).font(.caption2).foregroundStyle(.tertiary).lineLimit(1).truncationMode(.tail)
                 }
                 Spacer()
@@ -392,20 +447,27 @@ private struct ScheduleHistoryRow: View {
                 .font(.caption)
                 .frame(width: 150, alignment: .leading)
                 .lineLimit(1)
-            if run.ok == false {
+            switch run.outcome {
+            case .incomplete:
+                Text(run.incompleteSummary ?? "incomplete")
+                    .font(.caption2)
+                    .foregroundStyle(.orange)
+                    .lineLimit(1)
+                    .help("This check could not read every location, so it is not a clean result. Anything it did find is shown.")
+                severityBadges
+            case .failed:
                 Text("did not complete").font(.caption2).foregroundStyle(.orange)
-            } else if let counts = run.counts, counts.total > 0 {
-                severity("critical", counts.critical)
-                severity("high", counts.high)
-                severity("medium", counts.medium)
-                severity("low", counts.low)
-            } else {
+            case .findings:
+                severityBadges
+            case .clean:
                 Text("no findings").font(.caption2).foregroundStyle(.secondary)
+            case .unknown:
+                Text("result unknown").font(.caption2).foregroundStyle(.secondary)
             }
             Spacer()
             Text(changes)
                 .font(.caption2)
-                .foregroundStyle(run.unassessedCount > 0 ? Color.orange : Color.secondary)
+                .foregroundStyle(run.unassessedCount > 0 || run.incomplete == true ? Color.orange : Color.secondary)
                 .lineLimit(1)
                 .help(run.unassessedCount > 0 ? "Not assessed: earlier findings this run could not look at again. They may still be present." : "")
             if let trigger = run.trigger, !trigger.isEmpty {
@@ -413,6 +475,16 @@ private struct ScheduleHistoryRow: View {
             }
         }
         .accessibilityElement(children: .combine)
+    }
+
+    @ViewBuilder
+    private var severityBadges: some View {
+        if let counts = run.counts, counts.total > 0 {
+            severity("critical", counts.critical)
+            severity("high", counts.high)
+            severity("medium", counts.medium)
+            severity("low", counts.low)
+        }
     }
 
     @ViewBuilder
@@ -427,7 +499,8 @@ private struct ScheduleHistoryRow: View {
 
     private var changes: String {
         var text = "+\(run.new ?? 0) new, \(run.worsened ?? 0) worsened, \(run.resolved ?? 0) resolved"
-        if run.unassessedCount > 0 { text += ", \(run.unassessedCount) not assessed" }
+        // The row's incomplete label already names the unassessed count.
+        if run.unassessedCount > 0 && run.incomplete != true { text += ", \(run.unassessedCount) not assessed" }
         return text
     }
 }

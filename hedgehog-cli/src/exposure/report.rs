@@ -378,7 +378,7 @@ pub fn render_text(r: &ExposureReport, color: bool) -> String {
 
 /// What the verified-report stamp's checksum is, and how to recompute it.
 /// Shared by the text and HTML reports.
-pub const CHECKSUM_NOTE: &str = "Each finding's provider check says what the provider confirmed (identity or a specific permission) under a Gorse Pro licence. The integrity checksum covers the report as emitted, including any history comparison, and its stamp. It detects accidental or careless edits; it is not a cryptographic signature and does not prove who produced the report. Recipe: SHA-256 of the JSON report serialised compactly with keys sorted, with 'generated_at' and 'attestation.digest' removed.";
+pub const CHECKSUM_NOTE: &str = "Each finding's provider check says what the provider confirmed (identity or a specific permission) under a Gorse Pro licence. The integrity checksum covers the report as emitted, including any history comparison, and its stamp. It detects accidental or careless edits; it is not a cryptographic signature and does not prove who produced the report. Recipe: 'sha256:' and the hex SHA-256 of the JSON report serialised compactly with keys sorted, with the top-level 'generated_at' and 'attestation.digest' removed (and the top-level 'accepted_by_user' that history files from older versions may carry).";
 
 /// Previous findings this run did not assess (recorded runs only).
 fn unassessed_of(r: &ExposureReport) -> &[crate::schedule::ChangeEntry] {
@@ -936,6 +936,7 @@ mod tests {
             credential: c,
             links: vec![],
             verify_key: None,
+            source: None,
         }];
         let decl = Declarations::default();
         let (graph, laptop, nodes) = build_graph(&discovered, &decl);

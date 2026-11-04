@@ -321,6 +321,26 @@ impl Permission {
         Permission::RequiresIndependentApproval,
     ];
 
+    /// The permissions that bear on a finding's severity: every one that
+    /// scoring can raise a severity from, plus `AssumeRole`, which opens
+    /// paths to other roles. `RequiresMfa` and `RequiresIndependentApproval`
+    /// are compensating controls: they are reported but never change the
+    /// severity, so they do not hold the capability assurance down.
+    pub const SEVERITY_BEARING: [Permission; 7] = [
+        Permission::Administrative,
+        Permission::CreateCredentials,
+        Permission::ModifyOwnPermissions,
+        Permission::AssumeRole,
+        Permission::AccessProduction,
+        Permission::ModifyProduction,
+        Permission::ReachSigningInfrastructure,
+    ];
+
+    /// Whether this permission bears on a finding's severity.
+    pub fn bears_on_severity(self) -> bool {
+        Self::SEVERITY_BEARING.contains(&self)
+    }
+
     /// The field name, as the JSON report uses it.
     pub fn key(self) -> &'static str {
         match self {
@@ -476,20 +496,31 @@ impl EffectivePermissions {
         }
     }
 
-    /// The assurance behind the capability flags taken together: the
-    /// weakest of every flag that was determined (yes or no). With nothing
-    /// determined it is never confirmed, since nothing was established.
+    /// The assurance behind the capability flags taken together.
+    ///
+    /// Confirmed only when every permission that bears on the severity was
+    /// established (yes or no) by a provider check of that specific
+    /// permission. One confirmed answer says nothing about the permissions
+    /// whose check failed, was denied or never ran, so any permission that
+    /// is unknown or only inferred makes the whole inferred when anything
+    /// at all was determined, and unknown when nothing was. Never stronger
+    /// than the credential's own assurance once anything is short of
+    /// confirmed.
     pub fn capabilities_assurance(&self) -> Assurance {
-        let mut determined = Permission::ALL
+        let all_confirmed = Permission::SEVERITY_BEARING
             .iter()
-            .filter(|p| self.get(**p) != Capability::Unknown)
-            .peekable();
-        if determined.peek().is_none() {
-            return self.assurance.weakest(Assurance::Inferred);
+            .all(|p| self.is_confirmed(*p) && self.get(*p) != Capability::Unknown);
+        if all_confirmed {
+            return Assurance::Confirmed;
         }
-        determined.fold(Assurance::Confirmed, |a, p| {
-            a.weakest(self.capability_assurance(*p))
-        })
+        let determined = Permission::ALL
+            .iter()
+            .any(|p| self.get(*p) != Capability::Unknown);
+        if determined {
+            self.assurance.weakest(Assurance::Inferred)
+        } else {
+            Assurance::Unknown
+        }
     }
 
     /// Drop every per-capability confirmation: what remains is inferred.
@@ -663,7 +694,8 @@ mod tests {
             p.capability_assurance(Permission::Administrative),
             Assurance::Confirmed
         );
-        assert_eq!(p.capabilities_assurance(), Assurance::Confirmed);
+        // One confirmed permission is not the whole: the others are unknown.
+        assert_eq!(p.capabilities_assurance(), Assurance::Inferred);
         // A later inference takes the confirmation away.
         p.infer(Permission::Administrative, Capability::Yes);
         assert!(!p.is_confirmed(Permission::Administrative));
@@ -675,7 +707,52 @@ mod tests {
             assurance: Assurance::Confirmed,
             ..Default::default()
         };
-        assert_eq!(q.capabilities_assurance(), Assurance::Inferred);
+        assert_eq!(q.capabilities_assurance(), Assurance::Unknown);
+    }
+
+    #[test]
+    fn capabilities_confirmed_only_when_every_severity_permission_is() {
+        let mut p = EffectivePermissions {
+            assurance: Assurance::Confirmed,
+            ..Default::default()
+        };
+        for perm in Permission::SEVERITY_BEARING {
+            p.confirm(perm, Capability::No);
+        }
+        assert_eq!(p.capabilities_assurance(), Assurance::Confirmed);
+        // Compensating controls never hold it down.
+        assert!(!Permission::RequiresMfa.bears_on_severity());
+        assert!(!Permission::RequiresIndependentApproval.bears_on_severity());
+        // Any one of them left unknown (its check failed) makes it inferred.
+        for perm in Permission::SEVERITY_BEARING {
+            let mut q = p.clone();
+            q.confirm(perm, Capability::Unknown);
+            assert_eq!(q.capabilities_assurance(), Assurance::Inferred, "{perm:?}");
+            // And any one only inferred does too.
+            let mut r = p.clone();
+            r.infer(perm, Capability::Yes);
+            assert_eq!(r.capabilities_assurance(), Assurance::Inferred, "{perm:?}");
+        }
+        // A confirmed list that claims an unknown value establishes nothing.
+        let mut s = p.clone();
+        s.administrative = Capability::Unknown;
+        assert_eq!(s.capabilities_assurance(), Assurance::Inferred);
+    }
+
+    #[test]
+    fn aws_assume_role_alone_is_inferred() {
+        // Auditor's case: the assumed role was confirmed, policy listing was
+        // denied, so every other permission is unknown.
+        let mut p = EffectivePermissions {
+            assurance: Assurance::Confirmed,
+            ..Default::default()
+        };
+        p.confirm(Permission::AssumeRole, Capability::Yes);
+        assert_eq!(
+            p.capability_assurance(Permission::AssumeRole),
+            Assurance::Confirmed
+        );
+        assert_eq!(p.capabilities_assurance(), Assurance::Inferred);
     }
 
     #[test]

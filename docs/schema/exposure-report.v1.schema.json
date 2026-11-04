@@ -267,7 +267,7 @@
         "digest": {
           "type": "string",
           "pattern": "^sha256:[0-9a-f]{64}$",
-          "description": "Checksum of the report and its stamp. It detects accidental or careless edits; it is not a cryptographic signature and does not prove who produced the report. 'sha256:' followed by the hex SHA-256 of this document serialised compactly with keys sorted, with the top-level 'generated_at' member and this 'attestation.digest' member removed (holder, machine and verified_at stay in)"
+          "description": "Checksum of the report and its stamp. It detects accidental or careless edits; it is not a cryptographic signature and does not prove who produced the report. 'sha256:' followed by the hex SHA-256 of this document serialised compactly with keys sorted, with the top-level 'generated_at' member, this 'attestation.digest' member and any top-level 'accepted_by_user' member removed (holder, machine and verified_at stay in). History files written by older versions may carry 'accepted_by_user' (an earlier 'gorse schedule accept-baseline' wrote it into the run); it is not part of the check result. Current versions never modify a recorded run. The checksum is computed last, over the report exactly as emitted, including 'changes', 'recorded_at' and 'trigger' for a recorded run"
         }
       }
     }
