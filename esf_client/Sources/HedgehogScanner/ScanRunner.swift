@@ -281,16 +281,39 @@ enum ScanRunner {
 
     enum Status { case exited(Int32), timedOut }
 
-    static func execute(_ executable: URL, arguments: [String], timeout: TimeInterval, input: Data? = nil, onStderrLine: ((String) -> Void)? = nil) async throws -> (Data, Data, Status) {
-        try await withCheckedThrowingContinuation { continuation in
-            DispatchQueue.global(qos: .userInitiated).async {
-                do { continuation.resume(returning: try executeBlocking(executable, arguments: arguments, timeout: timeout, input: input, onStderrLine: onStderrLine)) }
-                catch { continuation.resume(throwing: error) }
-            }
+    /// Lets a cancelled Swift task stop the child it is waiting on, so a
+    /// long wait (the browser sign-in) ends when the person clicks Cancel.
+    private final class ChildHandle: @unchecked Sendable {
+        private let lock = NSLock()
+        private var process: Process?
+        private var cancelled = false
+        func attach(_ process: Process) {
+            lock.lock(); defer { lock.unlock() }
+            self.process = process
+            if cancelled { process.terminate() }
+        }
+        func cancel() {
+            lock.lock(); defer { lock.unlock() }
+            cancelled = true
+            if let process, process.isRunning { process.terminate() }
         }
     }
 
-    private static func executeBlocking(_ executable: URL, arguments: [String], timeout: TimeInterval, input: Data? = nil, onStderrLine: ((String) -> Void)? = nil) throws -> (Data, Data, Status) {
+    static func execute(_ executable: URL, arguments: [String], timeout: TimeInterval, input: Data? = nil, onStderrLine: ((String) -> Void)? = nil) async throws -> (Data, Data, Status) {
+        let handle = ChildHandle()
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                DispatchQueue.global(qos: .userInitiated).async {
+                    do { continuation.resume(returning: try executeBlocking(executable, arguments: arguments, timeout: timeout, input: input, onStderrLine: onStderrLine, handle: handle)) }
+                    catch { continuation.resume(throwing: error) }
+                }
+            }
+        } onCancel: {
+            handle.cancel()
+        }
+    }
+
+    private static func executeBlocking(_ executable: URL, arguments: [String], timeout: TimeInterval, input: Data? = nil, onStderrLine: ((String) -> Void)? = nil, handle: ChildHandle? = nil) throws -> (Data, Data, Status) {
         let process = Process()
         process.executableURL = executable
         process.arguments = arguments
@@ -343,6 +366,8 @@ enum ScanRunner {
             stdinPipe.fileHandleForWriting.write(input)
             try? stdinPipe.fileHandleForWriting.close()
         }
+        // Attached after stdin is written so a cancel cannot close the pipe under the write.
+        handle?.attach(process)
         let deadline = DispatchTime.now() + timeout
         var timedOut = false
         let finished = DispatchSemaphore(value: 0)

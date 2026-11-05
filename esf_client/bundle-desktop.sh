@@ -56,6 +56,9 @@ done
 if [[ "$NOTARIZE" == 1 ]]; then
     [[ -n "$SIGN_IDENTITY" ]] || { echo "--notarize needs --sign" >&2; exit 2; }
     [[ -n "${HEDGEHOG_NOTARY_PROFILE:-}" ]] || { echo "--notarize needs HEDGEHOG_NOTARY_PROFILE" >&2; exit 2; }
+    # CI keeps the profile in a temporary keychain named here; unset locally.
+    NOTARY_AUTH=(--keychain-profile "$HEDGEHOG_NOTARY_PROFILE")
+    [[ -z "${HEDGEHOG_NOTARY_KEYCHAIN:-}" ]] || NOTARY_AUTH+=(--keychain "$HEDGEHOG_NOTARY_KEYCHAIN")
 fi
 
 # ---------------------------------------------------------------- build ----
@@ -147,7 +150,7 @@ zip_app
 if [[ "$NOTARIZE" == 1 ]]; then
     echo "Notarizing..."
     REPORT="$TEMP/notarization.json"
-    xcrun notarytool submit "$ZIP_PATH" --keychain-profile "$HEDGEHOG_NOTARY_PROFILE" --wait --output-format json > "$REPORT"
+    xcrun notarytool submit "$ZIP_PATH" "${NOTARY_AUTH[@]}" --wait --output-format json > "$REPORT"
     if [[ "$(plutil -extract status raw -o - "$REPORT")" != "Accepted" ]]; then
         echo "Notarization was not accepted; the app cannot ship." >&2; cat "$REPORT" >&2; exit 1
     fi
@@ -287,7 +290,7 @@ if [[ -n "$SIGN_IDENTITY" ]]; then
     if [[ "$NOTARIZE" == 1 ]]; then
         echo "Notarizing the disk image..."
         REPORT_DMG="$TEMP/notarization-dmg.json"
-        xcrun notarytool submit "$DMG_PATH" --keychain-profile "$HEDGEHOG_NOTARY_PROFILE" --wait --output-format json > "$REPORT_DMG"
+        xcrun notarytool submit "$DMG_PATH" "${NOTARY_AUTH[@]}" --wait --output-format json > "$REPORT_DMG"
         if [[ "$(plutil -extract status raw -o - "$REPORT_DMG")" != "Accepted" ]]; then
             echo "Disk image notarization was not accepted; it cannot ship." >&2; cat "$REPORT_DMG" >&2; exit 1
         fi

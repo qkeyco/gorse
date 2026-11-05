@@ -212,8 +212,10 @@ struct VerificationCounts: Codable, Hashable {
 
     /// Anything a provider check produced at all (not counting not_attempted).
     var attempted: Int {
-        (identity_confirmed ?? 0) + (permission_confirmed ?? 0) + (local_config ?? 0)
-            + (confirmed ?? 0) + (failed ?? 0) + (unsupported ?? 0)
+        // An array sum rather than one long chain of `??` and `+`, which older
+        // Swift compilers (Xcode 16 on CI) give up type-checking.
+        let counts: [Int?] = [identity_confirmed, permission_confirmed, local_config, confirmed, failed, unsupported]
+        return counts.reduce(0) { $0 + ($1 ?? 0) }
     }
 
     /// "2 identity confirmed, 1 permission confirmed, 1 local configuration

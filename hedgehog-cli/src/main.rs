@@ -44,6 +44,7 @@ mod canary_watcher;
 mod config;
 mod content_scanner;
 mod credential_store;
+mod device_link;
 mod encrypted_store;
 mod engines;
 mod exposure;
@@ -166,14 +167,23 @@ enum Commands {
     },
     /// Send a team report to the dashboard (requires team-tier license)
     Report,
-    /// Activate a license key on this machine
+    /// Activate Pro on this computer: in the browser (--browser) or with a key
     Activate {
         /// License key (prefer --stdin to keep it out of process arguments)
-        #[arg(required_unless_present = "stdin", conflicts_with = "stdin")]
+        #[arg(required_unless_present_any = ["stdin", "browser", "browser_start"], conflicts_with_all = ["stdin", "browser", "browser_start", "browser_wait"])]
         key: Option<String>,
         /// Read a bounded key from standard input
         #[arg(long)]
         stdin: bool,
+        /// Sign in on gorse.is in the browser and confirm a code; no key to copy
+        #[arg(long, conflicts_with_all = ["stdin", "browser_start", "browser_wait"])]
+        browser: bool,
+        /// For the apps: start a browser activation and print its code and page as JSON
+        #[arg(long, hide = true, conflicts_with_all = ["stdin", "browser_wait"])]
+        browser_start: bool,
+        /// For the apps: wait for a browser activation; the device secret is read from standard input
+        #[arg(long, hide = true, requires = "stdin")]
+        browser_wait: bool,
         #[arg(long)]
         json: bool,
     },
@@ -578,7 +588,24 @@ fn main() {
         Commands::Config { path, init } => cmd_config(path, init),
         Commands::Hook { agent } => cmd_hook(agent),
         Commands::Report => cmd_report(),
-        Commands::Activate { key, stdin, json } => cmd_activate(key, stdin, json),
+        Commands::Activate {
+            key,
+            stdin,
+            browser,
+            browser_start,
+            browser_wait,
+            json,
+        } => {
+            if browser {
+                cmd_activate_browser(json)
+            } else if browser_start {
+                cmd_activate_browser_start(json)
+            } else if browser_wait {
+                cmd_activate_browser_wait(json)
+            } else {
+                cmd_activate(key, stdin, json)
+            }
+        }
         Commands::Deactivate { json } => cmd_deactivate(json),
         Commands::License { command } => match command {
             LicenseCommand::Status { json } => print_license_status(json),
@@ -3134,6 +3161,12 @@ fn cmd_activate(key: Option<String>, from_stdin: bool, json: bool) {
     } else {
         key.unwrap_or_default()
     };
+    install_license_key(&key, json);
+}
+
+/// Validate and store a key, then print the licence state (or exit with an error).
+fn install_license_key(key: &str, json: bool) {
+    let key = key.to_string();
     // Check signatures even on unsupported platforms before any writes. A
     // signature failure asks the server which issuer key it signs with, so a
     // deployment that signs with a key this build does not trust is named as
@@ -3158,6 +3191,61 @@ fn cmd_activate(key: Option<String>, from_stdin: bool, json: bool) {
         license_error(&error, json);
     }
     print_license_status(json);
+}
+
+/// Fifteen minutes plus slack: the server's code lifetime bounds every wait.
+const BROWSER_ACTIVATION_WAIT: std::time::Duration = std::time::Duration::from_secs(15 * 60 + 30);
+
+fn browser_activation_start(json: bool) -> device_link::Started {
+    let machine =
+        credential_store::machine_id().unwrap_or_else(|error| license_error(&error, json));
+    device_link::start(&machine).unwrap_or_else(|error| license_error(&error, json))
+}
+
+fn cmd_activate_browser(json: bool) {
+    let started = browser_activation_start(json);
+    if !json {
+        println!("Opening {} in your browser.", started.verify_url);
+        println!();
+        println!("  Check the page shows this code: {}", started.user_code);
+        println!();
+        println!("Then click Activate. Waiting (press Ctrl-C to stop)...");
+    }
+    web::open_browser(&started.verify_url);
+    let key = device_link::wait(&started.device_secret, BROWSER_ACTIVATION_WAIT)
+        .unwrap_or_else(|error| license_error(&error, json));
+    install_license_key(&key, json);
+}
+
+fn cmd_activate_browser_start(json: bool) {
+    let started = browser_activation_start(json);
+    if json {
+        println!("{}", serde_json::to_string(&started).unwrap());
+    } else {
+        // Humans use --browser; never print the secret where it could be copied around.
+        println!(
+            "Open {} and check the code {}",
+            started.verify_url, started.user_code
+        );
+    }
+}
+
+fn cmd_activate_browser_wait(json: bool) {
+    use std::io::Read;
+    let mut secret = String::new();
+    if std::io::stdin()
+        .take(256)
+        .read_to_string(&mut secret)
+        .is_err()
+    {
+        license_error(
+            "Cannot read the activation secret from standard input",
+            json,
+        );
+    }
+    let key = device_link::wait(secret.trim(), BROWSER_ACTIVATION_WAIT)
+        .unwrap_or_else(|error| license_error(&error, json));
+    install_license_key(&key, json);
 }
 
 fn cmd_deactivate(json: bool) {

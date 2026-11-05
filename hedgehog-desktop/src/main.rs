@@ -12,7 +12,9 @@ use eframe::egui::{self, Color32, RichText};
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, Receiver};
+use std::sync::Arc;
 use std::time::Duration;
 
 // ---------------------------------------------------------------- report ----
@@ -446,7 +448,12 @@ fn license_status() -> License {
 /// and stores the lease. Returns the new state or an error to show.
 fn activate_key(key: &str) -> Result<License, String> {
     let out = run_cli(&["activate", "--stdin", "--json"], Some(key.trim()))?;
-    if let Ok(r) = serde_json::from_slice::<ActivateResponse>(&out) {
+    parse_activation(&out, "The key could not be activated.")
+}
+
+/// Reads what `activate --json` prints: the new licence or its error.
+fn parse_activation(out: &[u8], fallback: &str) -> Result<License, String> {
+    if let Ok(r) = serde_json::from_slice::<ActivateResponse>(out) {
         if let Some(e) = r.error.filter(|e| !e.is_empty()) {
             return Err(e);
         }
@@ -457,13 +464,167 @@ fn activate_key(key: &str) -> Result<License, String> {
             });
         }
     }
-    if let Ok(l) = serde_json::from_slice::<LicenseStatus>(&out) {
+    if let Ok(l) = serde_json::from_slice::<LicenseStatus>(out) {
         return Ok(License {
             tier: l.tier.unwrap_or_else(|| "free".into()).to_ascii_lowercase(),
             email: l.email,
         });
     }
-    Err("The key could not be activated.".into())
+    Err(fallback.into())
+}
+
+// Activation in the browser: the CLI asks gorse.is for a short code, the
+// person signs in and approves it there, and the CLI waits for the lease.
+// The device secret stays inside the worker thread and the CLI's stdin;
+// the window only ever sees the code and the page address.
+#[derive(Deserialize)]
+struct BrowserStart {
+    user_code: String,
+    verify_url: String,
+    device_secret: String,
+    #[serde(default = "default_expiry")]
+    expires_in: u64,
+}
+
+fn default_expiry() -> u64 {
+    900
+}
+
+enum BrowserMsg {
+    Code {
+        user_code: String,
+        verify_url: String,
+    },
+    Done(Result<License, String>),
+}
+
+/// Starts browser activation on a worker thread. Setting `cancel` stops the
+/// wait and kills the checker; anything it sends later goes nowhere.
+fn run_browser_activation(cancel: Arc<AtomicBool>) -> Receiver<BrowserMsg> {
+    let (tx, rx) = channel();
+    std::thread::spawn(move || {
+        let start = match browser_start() {
+            Ok(s) => s,
+            Err(e) => {
+                let _ = tx.send(BrowserMsg::Done(Err(e)));
+                return;
+            }
+        };
+        let BrowserStart {
+            user_code,
+            verify_url,
+            device_secret,
+            expires_in,
+        } = start;
+        if tx
+            .send(BrowserMsg::Code {
+                user_code,
+                verify_url,
+            })
+            .is_err()
+            || cancel.load(Ordering::SeqCst)
+        {
+            return;
+        }
+        let limit = Duration::from_secs(expires_in.min(3600) + 30);
+        let result = run_cli_cancellable(
+            &["activate", "--browser-wait", "--stdin", "--json"],
+            &device_secret,
+            limit,
+            &cancel,
+        )
+        .and_then(|out| parse_activation(&out, "Activation did not finish. Please try again."));
+        if !cancel.load(Ordering::SeqCst) {
+            let _ = tx.send(BrowserMsg::Done(result));
+        }
+    });
+    rx
+}
+
+fn browser_start() -> Result<BrowserStart, String> {
+    let out = run_cli(&["activate", "--browser-start", "--json"], None)?;
+    let v: serde_json::Value = serde_json::from_slice(&out).map_err(|_| {
+        "Could not reach gorse.is. Check your internet connection and try again.".to_string()
+    })?;
+    if let Some(e) = v
+        .get("error")
+        .and_then(|e| e.as_str())
+        .filter(|e| !e.is_empty())
+    {
+        return Err(e.to_string());
+    }
+    let start: BrowserStart = serde_json::from_value(v)
+        .map_err(|_| "Could not start activation. Please try again.".to_string())?;
+    if !safe_url(&start.verify_url) {
+        return Err("Could not start activation. Please try again.".into());
+    }
+    Ok(start)
+}
+
+/// Only plain https addresses go to the shell that opens the browser.
+fn safe_url(url: &str) -> bool {
+    url.starts_with("https://")
+        && url
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || ":/.?=-_%".contains(c))
+}
+
+/// Like `run_cli` with stdin, but gives up after `limit` and stops as soon
+/// as `cancel` is set, killing the checker either way.
+fn run_cli_cancellable(
+    args: &[&str],
+    input: &str,
+    limit: Duration,
+    cancel: &AtomicBool,
+) -> Result<Vec<u8>, String> {
+    use std::io::{Read, Write};
+    let cli = cli_path().ok_or("The checker is missing.")?;
+    let mut cmd = Command::new(&cli);
+    cmd.args(args)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000);
+    }
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| format!("Could not start the checker: {e}"))?;
+    if let Some(mut stdin) = child.stdin.take() {
+        let _ = stdin.write_all(input.as_bytes());
+        let _ = stdin.write_all(b"\n");
+    }
+    let mut stdout = child.stdout.take();
+    let reader = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(out) = stdout.as_mut() {
+            let _ = out.read_to_end(&mut buf);
+        }
+        buf
+    });
+    let started = std::time::Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if cancel.load(Ordering::SeqCst) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err("Cancelled.".into());
+            }
+            Ok(None) if started.elapsed() > limit => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err("The code expired before it was approved. Please try again.".into());
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(200)),
+            Err(e) => return Err(format!("The checker did not finish: {e}")),
+        }
+    }
+    reader
+        .join()
+        .map_err(|_| "The checker did not finish.".to_string())
 }
 
 /// Tells the checker that a target is a production system, then the caller
@@ -944,6 +1105,34 @@ fn home_abbrev(location: &str) -> String {
 
 // ------------------------------------------------------------------- app ----
 
+/// The "Activate Pro" window while it is open.
+struct BrowserFlow {
+    rx: Option<Receiver<BrowserMsg>>,
+    cancel: Arc<AtomicBool>,
+    user_code: Option<String>,
+    verify_url: Option<String>,
+    error: Option<String>,
+}
+
+impl BrowserFlow {
+    fn start() -> Self {
+        let cancel = Arc::new(AtomicBool::new(false));
+        Self {
+            rx: Some(run_browser_activation(cancel.clone())),
+            cancel,
+            user_code: None,
+            verify_url: None,
+            error: None,
+        }
+    }
+}
+
+impl Drop for BrowserFlow {
+    fn drop(&mut self) {
+        self.cancel.store(true, Ordering::SeqCst);
+    }
+}
+
 #[derive(PartialEq, Clone, Copy)]
 enum Mode {
     Reach,
@@ -965,6 +1154,7 @@ struct App {
     license_rx: Option<Receiver<Result<License, String>>>,
     key_entry: Option<String>,
     key_error: Option<String>,
+    browser: Option<BrowserFlow>,
     mode: Mode,
     scan_running: Option<Receiver<ScanOutcome>>,
     scan: Option<ScanReport>,
@@ -1002,6 +1192,7 @@ impl App {
             license_rx: None,
             key_entry: None,
             key_error: None,
+            browser: None,
             mode: Mode::Reach,
             scan_running: None,
             scan: None,
@@ -1139,6 +1330,45 @@ impl App {
                 Err(_) => ctx.request_repaint_after(Duration::from_millis(250)),
             }
         }
+        let mut activated: Option<License> = None;
+        if let Some(flow) = self.browser.as_mut() {
+            if let Some(rx) = &flow.rx {
+                match rx.try_recv() {
+                    Ok(BrowserMsg::Code {
+                        user_code,
+                        verify_url,
+                    }) => {
+                        open_url(&verify_url);
+                        flow.user_code = Some(user_code);
+                        flow.verify_url = Some(verify_url);
+                        ctx.request_repaint_after(Duration::from_millis(250));
+                    }
+                    Ok(BrowserMsg::Done(Ok(license))) => {
+                        flow.rx = None;
+                        if !license.is_paid() {
+                            flow.error = Some("This computer was approved but no paid plan is active. Check your dashboard at gorse.is.".into());
+                        }
+                        activated = Some(license);
+                    }
+                    Ok(BrowserMsg::Done(Err(message))) => {
+                        flow.rx = None;
+                        flow.error = Some(message);
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        flow.rx = None;
+                        flow.error =
+                            Some("Activation stopped unexpectedly. Please try again.".into());
+                    }
+                    Err(_) => ctx.request_repaint_after(Duration::from_millis(250)),
+                }
+            }
+        }
+        if let Some(license) = activated {
+            if license.is_paid() {
+                self.browser = None;
+            }
+            self.license = license;
+        }
         if let Some(rx) = &self.scan_running {
             match rx.try_recv() {
                 Ok(ScanOutcome::Done(report)) => {
@@ -1218,9 +1448,11 @@ impl eframe::App for App {
                             ui.label(RichText::new(e).small().weak());
                         }
                     } else {
-                        if ui.small_button("Enter Key…").clicked() {
-                            self.key_entry = Some(String::new());
-                            self.key_error = None;
+                        if ui.button(RichText::new("Activate Pro…").strong()).clicked()
+                            && self.browser.is_none()
+                        {
+                            self.key_entry = None;
+                            self.browser = Some(BrowserFlow::start());
                         }
                         if ui.small_button("Upgrade to Pro").clicked() {
                             open_url(PRICING_URL);
@@ -1277,6 +1509,79 @@ impl eframe::App for App {
                     });
                     ui.add_space(4.0);
                 });
+            }
+        }
+        if let Some(flow) = &self.browser {
+            let mut open = true;
+            let mut close = false;
+            let mut retry = false;
+            let mut use_key = false;
+            egui::Window::new("Activate Pro")
+                .collapsible(false)
+                .resizable(false)
+                .open(&mut open)
+                .show(ctx, |ui| {
+                    if let Some(e) = &flow.error {
+                        ui.label(RichText::new(e).color(severity_color("critical")));
+                        ui.add_space(6.0);
+                        ui.horizontal(|ui| {
+                            if ui.button("Try again").clicked() {
+                                retry = true;
+                            }
+                            if ui.button("Close").clicked() {
+                                close = true;
+                            }
+                        });
+                    } else if let Some(code) = &flow.user_code {
+                        ui.label("Sign in on the page that just opened in your browser.");
+                        ui.add_space(8.0);
+                        ui.vertical_centered(|ui| {
+                            ui.label(RichText::new(code).size(32.0).strong().monospace());
+                        });
+                        ui.add_space(8.0);
+                        ui.label("Check that your browser shows this code, then click Activate.");
+                        ui.add_space(6.0);
+                        ui.horizontal(|ui| {
+                            ui.spinner();
+                            ui.label(RichText::new("Waiting for you to approve…").small().weak());
+                        });
+                        ui.add_space(6.0);
+                        ui.horizontal(|ui| {
+                            if ui.button("Open the page again").clicked() {
+                                if let Some(url) = &flow.verify_url {
+                                    open_url(url);
+                                }
+                            }
+                            if ui.button("Cancel").clicked() {
+                                close = true;
+                            }
+                        });
+                    } else {
+                        ui.horizontal(|ui| {
+                            ui.spinner();
+                            ui.label("Contacting gorse.is…");
+                        });
+                        if ui.button("Cancel").clicked() {
+                            close = true;
+                        }
+                    }
+                    ui.add_space(6.0);
+                    if ui
+                        .link(RichText::new("Use a licence key instead").small())
+                        .clicked()
+                    {
+                        use_key = true;
+                    }
+                });
+            if retry {
+                self.browser = Some(BrowserFlow::start());
+            } else if use_key {
+                self.browser = None;
+                self.key_entry = Some(String::new());
+                self.key_error = None;
+            } else if close || !open {
+                // Dropping the flow cancels it; a late result is discarded.
+                self.browser = None;
             }
         }
         if self.key_entry.is_some() {
@@ -2318,6 +2623,24 @@ mod tests {
             ),
             None
         );
+    }
+
+    #[test]
+    fn browser_activation_parses_and_guards_the_page_address() {
+        let ok = br#"{"license":{"tier":"Pro","email":"a@b.c"}}"#;
+        assert_eq!(parse_activation(ok, "x").unwrap().tier, "pro");
+        let err = br#"{"error":"The code expired.","license":{"tier":"free"}}"#;
+        assert_eq!(
+            parse_activation(err, "x").err().as_deref(),
+            Some("The code expired.")
+        );
+        assert_eq!(
+            parse_activation(b"", "fallback").err().as_deref(),
+            Some("fallback")
+        );
+        assert!(safe_url("https://www.gorse.is/activate?code=K7QP-4M2X"));
+        assert!(!safe_url("http://www.gorse.is/activate"));
+        assert!(!safe_url("https://www.gorse.is/a?x=1&calc"));
     }
 
     #[test]

@@ -317,17 +317,29 @@ pub fn verify_hook_command(command: &str, shell_tool: &str) -> Result<(), String
     .to_string();
 
     let scratch = ScratchHome::new()?;
-    let mut shell = shell_command(command);
-    shell
-        .env("HOME", &scratch.dir)
-        .env("USERPROFILE", &scratch.dir)
-        .env("APPDATA", &scratch.dir)
-        .env("XDG_CONFIG_HOME", scratch.dir.join(".config"))
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+    let probe_shell = || {
+        let mut shell = shell_command(command);
+        shell
+            .env("HOME", &scratch.dir)
+            .env("USERPROFILE", &scratch.dir)
+            .env("APPDATA", &scratch.dir)
+            .env("XDG_CONFIG_HOME", scratch.dir.join(".config"))
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        shell
+    };
 
-    let outcome = run_with_timeout(shell, &payload, PROBE_TIMEOUT);
+    // The first start of a newly installed binary can be slow (Windows
+    // scans new executables before running them), so one timeout gets one
+    // retry; a hook that misses both is broken.
+    let mut outcome = run_with_timeout(probe_shell(), &payload, PROBE_TIMEOUT);
+    if outcome
+        .as_ref()
+        .is_err_and(|e| e.contains("did not answer within"))
+    {
+        outcome = run_with_timeout(probe_shell(), &payload, PROBE_TIMEOUT);
+    }
     drop(scratch);
     let probe = outcome?;
 
