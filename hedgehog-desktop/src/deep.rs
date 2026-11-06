@@ -2,8 +2,10 @@
 // Copyright (c) 2026 QKey Co. Source-available, not open source; commercial use requires a licence. See NOTICE.md.
 //! Deep Scan: the files on this computer read for secrets by
 //! `gorse-cli scan --deep --json --progress`, as the Mac app shows it.
-//! Folders chosen here are scanned one at a time, each with its own resume
-//! file, and the reports are merged. Live progress and findings come from
+//! The default places are always scanned first; folders added here are
+//! extras, scanned after them one at a time (unless the default places
+//! already read them), each with its own resume file, and the reports are
+//! merged. Live progress and findings come from
 //! the CLI's stderr, one JSON object per line. A stop creates the stop file,
 //! so the CLI finishes cleanly and prints what it found (marked
 //! `interrupted`); nothing is ever thrown away for time. The window never
@@ -821,7 +823,7 @@ pub fn is_inside(inner: &Path, outer: &Path) -> bool {
     i.len() > o.len() && o.iter().zip(&i).all(|(x, y)| same_part(x, y))
 }
 
-/// Adds a chosen folder. A folder already chosen, or inside one, is not
+/// Adds an extra folder. A folder already added, or inside one, is not
 /// added (it would be read twice); choosing a parent replaces the folders
 /// inside it. Returns the folders it replaced, or None when not added.
 pub fn add_folder(folders: &mut Vec<PathBuf>, new: PathBuf) -> Option<Vec<PathBuf>> {
@@ -866,78 +868,104 @@ pub fn key_of(target: &Option<PathBuf>) -> String {
     }
 }
 
+/// The folders a default Deep Scan reads: each default place's folder (the
+/// hidden settings folders one by one, never the whole home they sit in),
+/// or the home folder itself when whole-home is on.
+pub fn default_roots(places: &[ScanPlace], home: Option<&Path>, whole_home: bool) -> Vec<PathBuf> {
+    if whole_home {
+        if let Some(h) = home {
+            return vec![h.to_path_buf()];
+        }
+    }
+    let mut roots = Vec::new();
+    for place in places {
+        let Some(path) = place.path.as_deref().filter(|p| !p.is_empty()) else {
+            continue;
+        };
+        if place.kind == "settings" {
+            for name in place
+                .detail
+                .split(',')
+                .map(str::trim)
+                .filter(|n| !n.is_empty())
+            {
+                roots.push(Path::new(path).join(name));
+            }
+        } else {
+            roots.push(PathBuf::from(path));
+        }
+    }
+    roots
+}
+
+/// True when the default places already read `folder`: it is one of
+/// `roots` or inside one (case-insensitively on Windows).
+pub fn is_covered(folder: &Path, roots: &[PathBuf]) -> bool {
+    roots
+        .iter()
+        .any(|r| same_path(folder, r) || is_inside(folder, r))
+}
+
 /// What the scan button does next.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Plan {
     pub label: String,
     /// Start over: forget earlier results and resume files first.
     pub rescan_all: bool,
-    /// `None` is the default places (or the whole home folder).
+    /// `None` is the default places (or the whole home folder), always
+    /// first; then each added folder the defaults do not already read.
     pub targets: Vec<Option<PathBuf>>,
     /// Offer a separate "Rescan All" as well.
     pub offer_rescan_all: bool,
 }
 
+/// The default places are always scanned; `extras` are the added folders
+/// not already read by them.
 pub fn plan_scan(
-    folders: &[PathBuf],
+    extras: &[PathBuf],
     has_report: impl Fn(&str) -> bool,
     has_resume: impl Fn(&str) -> bool,
     whole_home: bool,
 ) -> Plan {
-    if folders.is_empty() {
-        // A whole-home scan is never resumed: the Pro check runs each time.
-        let resumable = !whole_home && has_resume(DEFAULTS_KEY);
-        let label = if resumable {
-            "Resume Scan"
-        } else if whole_home {
-            "Deep Scan, Whole Home"
-        } else if has_report(DEFAULTS_KEY) {
-            "Rescan"
-        } else {
-            "Deep Scan"
-        };
-        return Plan {
-            label: label.into(),
-            rescan_all: !resumable,
-            targets: vec![None],
-            offer_rescan_all: resumable,
-        };
-    }
     let key = |f: &PathBuf| f.display().to_string();
-    let resumable: Vec<&PathBuf> = folders.iter().filter(|f| has_resume(&key(f))).collect();
-    let pending: Vec<&PathBuf> = folders.iter().filter(|f| !has_report(&key(f))).collect();
-    let any_report = folders.iter().any(|f| has_report(&key(f)));
-    if !resumable.is_empty() {
-        return Plan {
-            label: "Resume Scan".into(),
-            rescan_all: false,
-            targets: folders
+    // A whole-home scan is never resumed: the Pro check runs each time.
+    let defaults_resumable = !whole_home && has_resume(DEFAULTS_KEY);
+    let resumable = defaults_resumable || extras.iter().any(|f| has_resume(&key(f)));
+    let all: Vec<Option<PathBuf>> = std::iter::once(None)
+        .chain(extras.iter().cloned().map(Some))
+        .collect();
+    if resumable {
+        // Carry on the stopped targets and any not yet scanned, never a
+        // finished one.
+        let mut targets = Vec::new();
+        if defaults_resumable || !has_report(DEFAULTS_KEY) {
+            targets.push(None);
+        }
+        targets.extend(
+            extras
                 .iter()
                 .filter(|f| has_resume(&key(f)) || !has_report(&key(f)))
                 .cloned()
-                .map(Some)
-                .collect(),
-            offer_rescan_all: true,
-        };
-    }
-    if any_report && !pending.is_empty() {
-        let n = pending.len();
+                .map(Some),
+        );
         return Plan {
-            label: format!("Scan {n} New Folder{}", if n == 1 { "" } else { "s" }),
+            label: "Resume Scan".into(),
             rescan_all: false,
-            targets: pending.into_iter().cloned().map(Some).collect(),
+            targets,
             offer_rescan_all: true,
         };
     }
+    let label = if whole_home {
+        "Deep Scan, Whole Home"
+    } else if has_report(DEFAULTS_KEY) || extras.iter().any(|f| has_report(&key(f))) {
+        "Rescan"
+    } else {
+        "Deep Scan"
+    };
     Plan {
-        label: if any_report {
-            "Rescan All"
-        } else {
-            "Scan Chosen Folders"
-        }
-        .into(),
-        rescan_all: any_report,
-        targets: folders.iter().cloned().map(Some).collect(),
+        label: label.into(),
+        rescan_all: true,
+        targets: all,
         offer_rescan_all: false,
     }
 }
@@ -1309,13 +1337,37 @@ impl DeepState {
             .collect();
     }
 
+    /// Merges the default places' report with the extras' reports, leaving
+    /// out any folder the default places now read, so nothing counts twice.
     fn rebuild(&mut self) {
+        let keys: HashSet<String> = self
+            .extras()
+            .iter()
+            .map(|f| f.display().to_string())
+            .chain(Some(DEFAULTS_KEY.to_string()))
+            .collect();
+        self.reports.retain(|k, _| keys.contains(k));
         self.report = merge_reports(self.reports.values());
+    }
+
+    /// Where the default places read (the home folder when whole-home is on).
+    pub fn roots(&self) -> Vec<PathBuf> {
+        default_roots(&self.places, home_dir().as_deref(), self.whole_home)
+    }
+
+    /// The added folders the default places do not already read.
+    pub fn extras(&self) -> Vec<PathBuf> {
+        let roots = self.roots();
+        self.folders
+            .iter()
+            .filter(|f| !is_covered(f, &roots))
+            .cloned()
+            .collect()
     }
 
     pub fn plan(&self) -> Plan {
         plan_scan(
-            &self.folders,
+            &self.extras(),
             |k| self.reports.contains_key(k),
             |k| self.resumable.contains(k),
             self.whole_home,
@@ -1331,7 +1383,12 @@ impl DeepState {
         let Some(picked) = dialog.pick_folders() else {
             return;
         };
+        let roots = self.roots();
         for p in picked {
+            // Already read by the default places: nothing to add.
+            if is_covered(&p, &roots) {
+                continue;
+            }
             if let Some(replaced) = add_folder(&mut self.folders, p) {
                 for r in replaced {
                     self.reports.remove(&r.display().to_string());
@@ -1366,19 +1423,11 @@ impl DeepState {
             let _ = std::fs::remove_file(resume_file(DEFAULTS_KEY));
             self.resumable.clear();
         }
-        if !self.folders.is_empty() {
-            self.reports.remove(DEFAULTS_KEY);
-        } else {
-            self.reports.retain(|k, _| k == DEFAULTS_KEY);
-        }
         self.rebuild();
         self.error = None;
         self.live = LiveScan::default();
         self.stopping = false;
-        self.job = Some(start_scan(
-            plan.targets,
-            self.whole_home && self.folders.is_empty(),
-        ));
+        self.job = Some(start_scan(plan.targets, self.whole_home));
     }
 
     pub fn stop(&mut self) {
@@ -1511,11 +1560,10 @@ impl App {
             .id_salt("deep-left")
             .auto_shrink([false, false])
             .show(ui, |ui| {
-                if self.deep.folders.is_empty() {
-                    self.places_list(ui);
-                } else {
-                    self.folder_list(ui);
-                }
+                self.places_list(ui);
+                self.folder_list(ui);
+                ui.add_space(8.0);
+                self.engine_card(ui);
             });
     }
 
@@ -1558,7 +1606,7 @@ impl App {
                     .clicked()
                 {
                     let mut plan = plan_scan(
-                        &self.deep.folders,
+                        &self.deep.extras(),
                         |_| true,
                         |_| false,
                         self.deep.whole_home,
@@ -1571,11 +1619,9 @@ impl App {
         ui.add_space(4.0);
         ui.add(
             egui::Label::new(
-                RichText::new(if self.deep.folders.is_empty() {
-                    "Files are read on this computer and nothing leaves it. No secret is shown in full."
-                } else {
-                    "Only the folders above are read. Results stay on this computer."
-                })
+                RichText::new(
+                    "Files are read on this computer and nothing leaves it. No secret is shown in full.",
+                )
                 .small()
                 .weak(),
             )
@@ -1665,20 +1711,27 @@ impl App {
         ui.add_space(6.0);
         ui.add(
             egui::Label::new(
-                RichText::new("To look somewhere else instead, add folders with the Add button.")
+                RichText::new("To scan other folders as well, add them with the Add button.")
                     .small()
                     .color(Color32::GRAY),
             )
             .wrap(),
         );
-        ui.add_space(8.0);
-        self.engine_card(ui);
     }
 
+    /// The added folders, below the default places; each removable.
     fn folder_list(&mut self, ui: &mut egui::Ui) {
+        if self.deep.folders.is_empty() {
+            return;
+        }
         let scanning = self.deep.is_scanning();
+        let roots = self.deep.roots();
         let mut remove: Option<PathBuf> = None;
+        ui.add_space(8.0);
+        ui.label(RichText::new("Also scan").strong());
+        ui.add_space(4.0);
         for folder in &self.deep.folders {
+            let covered = is_covered(folder, &roots);
             ui.horizontal(|ui| {
                 ui.label("🗀");
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -1699,6 +1752,13 @@ impl App {
                             )
                             .truncate(),
                         );
+                        if covered {
+                            ui.label(
+                                RichText::new("Already included above")
+                                    .small()
+                                    .color(Color32::GRAY),
+                            );
+                        }
                     });
                 });
             });
@@ -2402,28 +2462,134 @@ mod tests {
         assert_eq!(p.label, "Deep Scan, Whole Home");
         assert!(p.rescan_all);
 
+        // Added folders are extras: the default places are still scanned,
+        // first, and the label never says the defaults were replaced.
         let folders = vec![
             PathBuf::from("/a"),
             PathBuf::from("/b"),
             PathBuf::from("/c"),
         ];
         let p = plan_scan(&folders, none, none, false);
-        assert_eq!(p.label, "Scan Chosen Folders");
-        assert_eq!(p.targets.len(), 3);
-        let p = plan_scan(&folders, |k| k == "/a", none, false);
-        assert_eq!(p.label, "Scan 2 New Folders");
-        assert_eq!(p.targets, vec![Some("/b".into()), Some("/c".into())]);
-        assert!(p.offer_rescan_all && !p.rescan_all);
-        let p = plan_scan(&folders, |k| k != "/c", none, false);
-        assert_eq!(p.label, "Scan 1 New Folder");
-        let p = plan_scan(&folders, |_| true, none, false);
-        assert_eq!(p.label, "Rescan All");
+        assert_eq!(p.label, "Deep Scan");
+        assert_eq!(
+            p.targets,
+            vec![
+                None,
+                Some("/a".into()),
+                Some("/b".into()),
+                Some("/c".into())
+            ]
+        );
+        assert!(p.rescan_all && !p.offer_rescan_all);
+        let p = plan_scan(&folders, none, none, true);
+        assert_eq!(p.label, "Deep Scan, Whole Home");
+        assert_eq!(p.targets.len(), 4);
+        assert_eq!(p.targets[0], None);
+        // Results from the defaults alone, or from one extra, make it a
+        // rescan of everything.
+        let p = plan_scan(&folders, |k| k == DEFAULTS_KEY, none, false);
+        assert_eq!(p.label, "Rescan");
         assert!(p.rescan_all);
-        // Resuming carries on the stopped folder and any not yet scanned,
-        // never a finished one.
+        assert_eq!(p.targets.len(), 4);
+        let p = plan_scan(&folders, |k| k == "/a", none, false);
+        assert_eq!(p.label, "Rescan");
+        let p = plan_scan(&folders, |_| true, none, false);
+        assert_eq!(p.label, "Rescan");
+        // Resuming carries on the stopped targets and any not yet scanned,
+        // never a finished one: a stopped default scan goes first.
         let p = plan_scan(&folders, |k| k != "/c", |k| k == "/b", false);
         assert_eq!(p.label, "Resume Scan");
         assert_eq!(p.targets, vec![Some("/b".into()), Some("/c".into())]);
+        assert!(!p.rescan_all && p.offer_rescan_all);
+        let p = plan_scan(&folders, |k| k == "/a", |k| k == DEFAULTS_KEY, false);
+        assert_eq!(p.label, "Resume Scan");
+        assert_eq!(p.targets, vec![None, Some("/b".into()), Some("/c".into())]);
+        // Stopped during an extra after the defaults finished.
+        let p = plan_scan(&folders, |k| k != "/b" && k != "/c", |k| k == "/b", false);
+        assert_eq!(p.targets, vec![Some("/b".into()), Some("/c".into())]);
+        // An extra's resume file still resumes with whole-home on; the
+        // whole-home part, never resumed, runs again only if it has no
+        // results.
+        let p = plan_scan(&folders, |_| true, |k| k == "/a", true);
+        assert_eq!(p.label, "Resume Scan");
+        assert_eq!(p.targets, vec![Some("/a".into())]);
+        for p in [
+            plan_scan(&folders, none, none, false),
+            plan_scan(&folders, |_| true, none, false),
+            plan_scan(&folders, none, |_| true, false),
+            plan_scan(&[], none, none, false),
+        ] {
+            assert_ne!(p.label, "Scan Chosen Folders");
+        }
+    }
+
+    fn place(kind: &str, path: Option<&str>, detail: &str) -> ScanPlace {
+        ScanPlace {
+            kind: kind.into(),
+            label: kind.into(),
+            path: path.map(str::to_string),
+            detail: detail.into(),
+        }
+    }
+
+    #[test]
+    fn folders_the_default_places_read_are_already_included() {
+        let places = vec![
+            place("notes", None, "Read first"),
+            place("pictures", None, "Text in pictures"),
+            place("folder", Some("/h/Desktop"), ""),
+            place("settings", Some("/h"), ".aws, .ssh"),
+            place("folder", Some("/h/Documents"), ""),
+            place("code", Some("/h/src"), "Code checkouts"),
+        ];
+        let roots = default_roots(&places, Some(Path::new("/h")), false);
+        assert_eq!(
+            roots,
+            vec![
+                PathBuf::from("/h/Desktop"),
+                PathBuf::from("/h/.aws"),
+                PathBuf::from("/h/.ssh"),
+                PathBuf::from("/h/Documents"),
+                PathBuf::from("/h/src"),
+            ]
+        );
+        // Equal to, or inside, a default place.
+        assert!(is_covered(Path::new("/h/Documents"), &roots));
+        assert!(is_covered(Path::new("/h/Documents/GitHub/app"), &roots));
+        assert!(is_covered(Path::new("/h/Documents/"), &roots));
+        assert!(is_covered(Path::new("/h/.ssh/keys"), &roots));
+        // The settings entry stands for its hidden folders, not the home
+        // folder they sit in.
+        assert!(!is_covered(Path::new("/h/Music"), &roots));
+        assert!(!is_covered(Path::new("/h"), &roots));
+        assert!(!is_covered(Path::new("/h/Documents2"), &roots));
+        assert!(!is_covered(Path::new("/srv/data"), &roots));
+        // Whole home reads everything under the home folder.
+        let whole = default_roots(&places, Some(Path::new("/h")), true);
+        assert_eq!(whole, vec![PathBuf::from("/h")]);
+        assert!(is_covered(Path::new("/h/Music"), &whole));
+        assert!(is_covered(Path::new("/h"), &whole));
+        assert!(!is_covered(Path::new("/srv/data"), &whole));
+        // Without a home folder, whole home falls back to the places.
+        assert_eq!(default_roots(&places, None, true), roots);
+        assert!(default_roots(&[], Some(Path::new("/h")), false).is_empty());
+    }
+
+    #[test]
+    fn covered_check_ignores_case_only_on_windows() {
+        if cfg!(windows) {
+            let roots = vec![PathBuf::from(r"C:\Users\Al\Documents")];
+            assert!(is_covered(
+                Path::new(r"c:\users\al\documents\GitHub"),
+                &roots
+            ));
+            assert!(is_covered(Path::new(r"C:\USERS\AL\DOCUMENTS"), &roots));
+            assert!(!is_covered(Path::new(r"C:\Users\Al\Music"), &roots));
+        } else {
+            let roots = vec![PathBuf::from("/h/Documents")];
+            assert!(!is_covered(Path::new("/h/documents/x"), &roots));
+            assert!(is_covered(Path::new("/h/Documents/x"), &roots));
+        }
     }
 
     #[test]

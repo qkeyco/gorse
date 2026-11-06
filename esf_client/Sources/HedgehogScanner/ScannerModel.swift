@@ -190,10 +190,32 @@ final class ScannerModel: ObservableObject {
         return support.appendingPathComponent("Gorse/resume/\(name).json")
     }
 
+    /// Desktop build: true when `url` is already read by the default Deep
+    /// Scan (one of its places, or inside one; anything under the home
+    /// folder when the whole home is scanned). Such a folder is not read again.
+    func isCovered(_ url: URL) -> Bool {
+        guard Self.canScanDefaults else { return false }
+        let home = URL(fileURLWithPath: NSHomeDirectory()).standardizedFileURL
+        let path = url.standardizedFileURL
+        if wholeHome { return path == home || Self.isInside(path, home) }
+        return defaultPlaces.contains { place in
+            guard let p = place.path else { return false }
+            let placeURL = URL(fileURLWithPath: p).standardizedFileURL
+            // A place that is the home folder itself (settings files) does not cover every folder.
+            guard placeURL != home else { return false }
+            return path == placeURL || Self.isInside(path, placeURL)
+        }
+    }
+
+    /// Desktop build: added folders the default Deep Scan does not already read.
+    var extraFolders: [ScanFolder] { folders.filter { !isCovered($0.url) } }
+
     /// True when the next scan carries on from a stopped one.
     var canResume: Bool {
         _ = resumeRevision
-        let ids = folders.isEmpty ? [Self.defaultsKey] : folders.map(\.id)
+        let ids = Self.canScanDefaults
+            ? [Self.defaultsKey] + extraFolders.map(\.id)
+            : (folders.isEmpty ? [Self.defaultsKey] : folders.map(\.id))
         return ids.contains { FileManager.default.fileExists(atPath: Self.resumeFile(for: $0).path) }
     }
 
@@ -264,6 +286,8 @@ final class ScannerModel: ObservableObject {
 
     private func add(_ url: URL) {
         let standardized = url.standardizedFileURL
+        // Desktop build: the Deep Scan already reads it.
+        guard !isCovered(standardized) else { return }
         guard !folders.contains(where: { $0.url == standardized }) else { return }
         // A folder inside one already chosen is read with it; adding it too
         // would read every file in it twice.
@@ -337,13 +361,18 @@ final class ScannerModel: ObservableObject {
             for folder in folders { try? FileManager.default.removeItem(at: Self.resumeFile(for: folder.id)) }
             try? FileManager.default.removeItem(at: Self.resumeFile(for: Self.defaultsKey))
         }
-        // The default places are always scanned when asked: a first scan, a
-        // Rescan, or a Resume (the resume file makes it carry on, not restart).
-        let targets: [ScanFolder?] = folders.isEmpty
-            ? [nil]
-            : (pendingFolders.isEmpty ? folders.map { Optional($0) } : pendingFolders.map { Optional($0) })
+        // Desktop build: the default places are always scanned (a first scan,
+        // a Rescan, or a Resume, which carries on from its resume file), then
+        // any added folder they do not already cover. The App Store build
+        // reads only the folders the user chose.
+        let targets: [ScanFolder?]
+        if Self.canScanDefaults {
+            targets = [nil] + extraFolders.map { Optional($0) }
+            for covered in folders where isCovered(covered.url) { reportsByFolder.removeValue(forKey: covered.id) }
+        } else {
+            targets = pendingFolders.isEmpty ? folders.map { Optional($0) } : pendingFolders.map { Optional($0) }
+        }
         if targets.isEmpty { return }
-        if !folders.isEmpty { reportsByFolder.removeValue(forKey: Self.defaultsKey) }
 
         for target in targets {
             if isStopping { break }

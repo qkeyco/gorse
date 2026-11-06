@@ -64,13 +64,14 @@ private struct FolderPane: View {
                 } label: {
                     Label("Add", systemImage: "plus")
                 }
-                .help("Choose folders to scan")
+                .help(ScannerModel.canScanDefaults ? "Add a folder to scan as well" : "Choose folders to scan")
             }
             .padding(12)
 
             Divider()
 
-            if model.folders.isEmpty && ScannerModel.canScanDefaults {
+            if ScannerModel.canScanDefaults {
+                ScrollView {
                 VStack(alignment: .leading, spacing: 10) {
                     Text("Where Gorse looks")
                         .font(.subheadline.weight(.semibold))
@@ -114,7 +115,33 @@ private struct FolderPane: View {
                             Button("Upgrade to Pro") { openPricing() }.buttonStyle(.link).font(.caption2)
                         }
                     }
-                    Text("To look somewhere else instead, add folders with the + button. If Apple Notes could not be read, give Gorse Full Disk Access in System Settings, Privacy & Security.")
+                    if !model.folders.isEmpty {
+                        Divider()
+                        Text("Also scan")
+                            .font(.subheadline.weight(.semibold))
+                        ForEach(model.folders) { folder in
+                            let covered = model.isCovered(folder.url)
+                            HStack(alignment: .top, spacing: 8) {
+                                Image(systemName: "folder").foregroundStyle(.secondary).frame(width: 16)
+                                VStack(alignment: .leading, spacing: 1) {
+                                    Text(folder.displayName).font(.caption.weight(.semibold))
+                                    Text(folder.displayPath).font(.caption2).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
+                                    if covered {
+                                        Text("Already included above").font(.caption2).foregroundStyle(.tertiary)
+                                    }
+                                }
+                                Spacer(minLength: 0)
+                                Button { model.remove(folder) } label: {
+                                    Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary)
+                                }
+                                .buttonStyle(.plain)
+                                .help("Remove from scan")
+                                .disabled(model.isScanning)
+                            }
+                            .opacity(covered ? 0.5 : 1)
+                        }
+                    }
+                    Text("To scan another folder as well, click Add. If Apple Notes could not be read, give Gorse Full Disk Access in System Settings, Privacy & Security.")
                         .font(.caption2)
                         .foregroundStyle(.tertiary)
                     #if HEDGEHOG_DESKTOP
@@ -122,7 +149,8 @@ private struct FolderPane: View {
                     #endif
                 }
                 .padding(14)
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                .frame(maxWidth: .infinity, alignment: .topLeading)
+                }
             } else if model.folders.isEmpty {
                 VStack(spacing: 10) {
                     Image(systemName: "folder.badge.plus")
@@ -198,7 +226,7 @@ private struct FolderPane: View {
                             Text("Scanning…")
                         } else if model.canResume {
                             Label("Resume Scan", systemImage: "play.fill")
-                        } else if model.folders.isEmpty && ScannerModel.canScanDefaults {
+                        } else if ScannerModel.canScanDefaults {
                             Label(model.wholeHome ? "Deep Scan, Whole Home" : (model.hasResults ? "Rescan" : "Deep Scan"), systemImage: "magnifyingglass")
                         } else if model.hasResults && !model.pendingFolders.isEmpty {
                             Label("Scan \(model.pendingFolders.count) New Folder\(model.pendingFolders.count == 1 ? "" : "s")", systemImage: "magnifyingglass")
@@ -214,13 +242,13 @@ private struct FolderPane: View {
                 .controlSize(.large)
                 .disabled((model.folders.isEmpty && !ScannerModel.canScanDefaults) || model.isScanning)
                 }
-                if model.hasResults && !model.pendingFolders.isEmpty {
+                if !ScannerModel.canScanDefaults && model.hasResults && !model.pendingFolders.isEmpty {
                     Button("Rescan All") { Task { await model.runScan(rescanAll: true) } }
                         .controlSize(.small)
                         .disabled(model.isScanning)
                 }
 
-                Text(model.folders.isEmpty && ScannerModel.canScanDefaults
+                Text(ScannerModel.canScanDefaults
                      ? "Files are read on this Mac and nothing leaves it. No secret is shown in full."
                      : "Only the folders above are read. Results stay on this Mac.")
                     .font(.caption2)

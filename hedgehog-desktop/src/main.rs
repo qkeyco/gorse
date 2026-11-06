@@ -812,7 +812,6 @@ fn cli_path() -> Option<PathBuf> {
         ("gorse-cli", "gorse")
     };
     let here = std::env::current_exe().ok()?;
-    let me = here.canonicalize().unwrap_or(here.clone());
     let dir = here.parent()?.to_path_buf();
     let mut candidates = vec![
         dir.join(bundled),
@@ -825,7 +824,33 @@ fn cli_path() -> Option<PathBuf> {
     }
     candidates
         .into_iter()
-        .find(|c| c.is_file() && c.canonicalize().map(|real| real != me).unwrap_or(false))
+        .find(|c| c.is_file() && !is_same_file(c, &here))
+}
+
+/// True when `a` and `b` are the same file on disk. Names alone are not
+/// enough: on the case-insensitive disks Windows and macOS use by default,
+/// `gorse` and `Gorse` are one file, and running this program as its own
+/// checker makes every copy start another (it once opened hundreds of
+/// windows). Unreadable paths count as the same, so they are never run.
+fn is_same_file(a: &Path, b: &Path) -> bool {
+    let (Ok(ra), Ok(rb)) = (a.canonicalize(), b.canonicalize()) else {
+        return true;
+    };
+    if ra == rb {
+        return true;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if let (Ok(ma), Ok(mb)) = (std::fs::metadata(&ra), std::fs::metadata(&rb)) {
+            return ma.dev() == mb.dev() && ma.ino() == mb.ino();
+        }
+        true
+    }
+    #[cfg(not(unix))]
+    {
+        ra.to_string_lossy().to_lowercase() == rb.to_string_lossy().to_lowercase()
+    }
 }
 
 /// This program's own folder: %LOCALAPPDATA%\Gorse on Windows,
@@ -2270,6 +2295,39 @@ fn capitalize(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn refuses_to_run_as_the_checker() {
+        let a = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert!(super::started_as_checker(&a(&[
+            "Gorse",
+            "scan",
+            "--list-places"
+        ])));
+        assert!(super::started_as_checker(&a(&[
+            "Gorse", "exposure", "--json"
+        ])));
+        assert!(!super::started_as_checker(&a(&["Gorse"])));
+        assert!(!super::started_as_checker(&a(&["Gorse", "-psn_0_12345"])));
+    }
+
+    #[test]
+    fn same_file_ignores_name_case_on_case_insensitive_disks() {
+        let dir = std::env::temp_dir().join(format!("gorse-same-file-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let upper = dir.join("Gorse");
+        std::fs::write(&upper, b"x").unwrap();
+        let lower = dir.join("gorse");
+        if lower.exists() {
+            // Case-insensitive disk (macOS, Windows): one file, two spellings.
+            assert!(super::is_same_file(&lower, &upper));
+        }
+        let other = dir.join("gorse-cli");
+        std::fs::write(&other, b"y").unwrap();
+        assert!(!super::is_same_file(&other, &upper));
+        assert!(super::is_same_file(&dir.join("missing"), &upper));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     use super::*;
 
     fn finding(confidence: Option<&str>) -> Finding {
@@ -2595,7 +2653,20 @@ fn window_size() -> [f32; 2] {
     [940.0, 640.0]
 }
 
+/// The window app takes no command words; the checker it runs does
+/// (`gorse scan …`, `gorse exposure …`). Started with one, this program was
+/// mistaken for the checker: it quits at once rather than open another
+/// window that would do the same.
+fn started_as_checker(args: &[String]) -> bool {
+    args.get(1).is_some_and(|a| !a.starts_with('-'))
+}
+
 fn main() -> eframe::Result {
+    let args: Vec<String> = std::env::args().collect();
+    if started_as_checker(&args) {
+        eprintln!("This is the Gorse window app, not the gorse command-line tool (gorse-cli).");
+        std::process::exit(2);
+    }
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title(concat!("Gorse ", env!("CARGO_PKG_VERSION")))

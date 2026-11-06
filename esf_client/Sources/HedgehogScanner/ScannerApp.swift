@@ -50,6 +50,19 @@ struct HedgehogDesktopApp: App {
                 ToolbarItem(placement: .primaryAction) { LicenseBadge(model: license) }
             }
             .task {
+                #if DEBUG
+                // Development only: GORSE_SHOT=<file.png> [GORSE_SHOT_TAB=deep]
+                // draws the window into a PNG and quits, so a change can be
+                // looked at without screen-recording permission.
+                if let shot = ProcessInfo.processInfo.environment["GORSE_SHOT"] {
+                    if ProcessInfo.processInfo.environment["GORSE_SHOT_TAB"] == "deep" { tab = .folders }
+                    await license.refresh()
+                    try? await Task.sleep(nanoseconds: 6_000_000_000)
+                    DevShot.write(to: shot)
+                    NSApp.terminate(nil)
+                    return
+                }
+                #endif
                 // A zip cannot install itself: offer the move before anything
                 // else, so the relaunch happens from Applications.
                 MoveToApplications.offerIfNeeded()
@@ -111,6 +124,20 @@ struct HedgehogScannerApp: App {
                     .disabled(model.folders.isEmpty || model.isScanning)
             }
         }
+    }
+}
+#endif
+
+#if DEBUG && HEDGEHOG_DESKTOP
+import AppKit
+
+/// Development only: renders the front window's content into a PNG.
+enum DevShot {
+    @MainActor static func write(to path: String) {
+        guard let view = NSApp.windows.first(where: { $0.isVisible })?.contentView?.superview else { return }
+        guard let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { return }
+        view.cacheDisplay(in: view.bounds, to: rep)
+        try? rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: path))
     }
 }
 #endif

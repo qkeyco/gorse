@@ -79,7 +79,10 @@ impl App {
                 };
                 if s.frames == 1 {
                     self.deep.folders = vec![folder];
-                    let plan = self.deep.plan();
+                    // Screenshots read only the demo folder, never the
+                    // default places of the machine taking them.
+                    let mut plan = self.deep.plan();
+                    plan.targets.retain(Option::is_some);
                     self.deep.run(plan);
                 }
                 s.frames > 60
