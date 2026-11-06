@@ -18,10 +18,9 @@ struct ScannerView: View {
         .onAppear {
             #if DEBUG
             let args = CommandLine.arguments
-            if let index = args.firstIndex(of: "--smoke-test"), args.indices.contains(index + 1) {
-                let output = args[index + 1]
+            if args.contains("--smoke-test") {
                 Task {
-                    await model.runSmokeTest(outputPath: output)
+                    await model.runSmokeTest()
                     NSApplication.shared.terminate(nil)
                 }
             }
@@ -250,7 +249,7 @@ private struct FolderPane: View {
 
                 Text(ScannerModel.canScanDefaults
                      ? "Files are read on this Mac and nothing leaves it. No secret is shown in full."
-                     : "Only the folders above are read. Results stay on this Mac.")
+                     : "Only the folders above are read, and nothing leaves this Mac. No secret is shown in full.")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
             }
@@ -333,7 +332,7 @@ private struct ResultsPane: View {
                             title: "Ready to scan",
                             detail: ScannerModel.canScanDefaults
                                 ? "Click Deep Scan. Gorse reads your documents, downloads, code, screenshots and notes for API keys, passwords, private keys, seed phrases, card numbers and other sensitive content."
-                                : "Choose one or more folders, then click Run Scan. Gorse looks for API keys, passwords, private keys, card numbers and other sensitive content.")
+                                : "Choose one or more folders, then click Scan Chosen Folders. Gorse looks for API keys, passwords, private keys, seed phrases, card numbers and other sensitive content, including the text in screenshots and photos.")
             }
         }
     }

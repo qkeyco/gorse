@@ -23,6 +23,7 @@
 #     Resources/AppIcon.icns
 #     MacOS/Gorse                     (universal SwiftUI app, HEDGEHOG_DESKTOP build)
 #     MacOS/gorse-cli                 (universal Rust CLI)
+#     MacOS/gorse-ocr                 (universal Vision text reader for pictures)
 #   Gorse-macOS.dmg                   (what /api/download?platform=macos-app serves:
 #                                      the app plus an Applications shortcut to drag it onto)
 #   Gorse-macOS.zip                   (the same app, for /api/download?platform=macos-zip)
@@ -85,11 +86,15 @@ if [[ "$SKIP_BUILD" == 0 ]]; then
     echo "Building universal Swift app ($CONFIG, HEDGEHOG_DESKTOP)..."
     (cd "$SCRIPT_DIR" && HEDGEHOG_SKIP_ESF=1 swift build -c "$CONFIG" --product HedgehogScanner \
         -Xswiftc -DHEDGEHOG_DESKTOP --arch arm64 --arch x86_64 --scratch-path "$SCRATCH")
+    echo "Building universal OCR helper..."
+    (cd "$SCRIPT_DIR" && HEDGEHOG_SKIP_ESF=1 swift build -c release --product GorseOCR \
+        --arch arm64 --arch x86_64 --scratch-path "$SCRATCH")
 fi
 
 CLI_BIN="$ROOT/target/desktop/gorse-cli"
 SWIFT_BIN="$SCRATCH/apple/Products/$(tr '[:lower:]' '[:upper:]' <<< "${CONFIG:0:1}")${CONFIG:1}/HedgehogScanner"
-for bin in "$CLI_BIN" "$SWIFT_BIN"; do
+OCR_BIN="$SCRATCH/apple/Products/Release/GorseOCR"
+for bin in "$CLI_BIN" "$SWIFT_BIN" "$OCR_BIN"; do
     [[ -x "$bin" ]] || { echo "Missing build product: $bin" >&2; exit 1; }
     for arch in arm64 x86_64; do
         lipo "$bin" -verify_arch "$arch" || { echo "$bin lacks $arch" >&2; exit 1; }
@@ -120,6 +125,7 @@ cp "$ROOT/LICENSE" "$APP/Contents/Resources/LICENSE"
 cp "$ROOT/LICENSE-THIRD-PARTY" "$APP/Contents/Resources/LICENSE-THIRD-PARTY"
 cp "$SWIFT_BIN" "$APP/Contents/MacOS/Gorse"
 cp "$CLI_BIN" "$APP/Contents/MacOS/gorse-cli"
+cp "$OCR_BIN" "$APP/Contents/MacOS/gorse-ocr"
 chmod 755 "$APP/Contents/MacOS/"*
 /usr/bin/xattr -cr "$APP"
 
@@ -149,6 +155,7 @@ sign() {  # sign PATH IDENTIFIER [ENTITLEMENTS]
 if [[ -n "$SIGN_IDENTITY" ]]; then echo "Code signing with identity: $SIGN_IDENTITY"; else echo "Code signing ad-hoc (local testing only)..."; fi
 # Inside-out: the helper first, then the app, which seals the helper's hash.
 sign "$APP/Contents/MacOS/gorse-cli" "is.hedgehog.app.cli"
+sign "$APP/Contents/MacOS/gorse-ocr" "is.hedgehog.app.ocr"
 sign "$APP" "is.hedgehog.app" "$APP_ENT"
 
 echo "Verifying signature..."

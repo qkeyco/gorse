@@ -1030,7 +1030,15 @@ fn check_aws_access_key(line: &str, line_number: usize, findings: &mut Vec<Conte
 
 fn check_api_key_prefixes(line: &str, line_number: usize, findings: &mut Vec<ContentFinding>) {
     for &(prefix, min_len, service) in API_KEY_PREFIXES {
-        if let Some(pos) = line.find(prefix) {
+        for (pos, _) in line.match_indices(prefix) {
+            // The prefix must start a token: "re_" inside "pre_bind" or a
+            // path is not a Resend key.
+            if let Some(before) = line[..pos].chars().next_back() {
+                if before.is_ascii_alphanumeric() || matches!(before, '_' | '-' | '/' | '\\' | '.')
+                {
+                    continue;
+                }
+            }
             // Extract the token: run forward until whitespace, quote, or end
             let token_start = pos;
             let rest = &line[token_start..];
@@ -1046,6 +1054,27 @@ fn check_api_key_prefixes(line: &str, line_number: usize, findings: &mut Vec<Con
                 })
                 .unwrap_or(rest.len());
             let token = &rest[..token_end];
+
+            // A key is one run of key characters; a path, a file name or an
+            // expression is not.
+            let dotted = prefix.ends_with('.') || prefix == "pat";
+            if token.contains([
+                '/', '\\', '+', '=', ':', '(', '[', '{', '<', '>', '*', '?', '&', '%', '$', '@',
+            ]) || (!dotted && token.contains('.'))
+            {
+                continue;
+            }
+            // Short prefixes also start ordinary names (re_render_all,
+            // hf_scale_v2). Keys of those services carry digits or capitals,
+            // and never read as snake_case or kebab-case words.
+            if prefix.len() <= 4 {
+                let suffix = &token[prefix.len().min(token.len())..];
+                let upper = suffix.chars().any(|c| c.is_ascii_uppercase());
+                let digit = suffix.chars().any(|c| c.is_ascii_digit());
+                if (!upper && !digit) || (!upper && suffix.contains(['_', '-'])) {
+                    continue;
+                }
+            }
 
             if token.len() >= min_len {
                 // For Twilio "AC" prefix, require exactly 32 hex chars after
@@ -1161,25 +1190,64 @@ fn check_jwt_token(line: &str, line_number: usize, findings: &mut Vec<ContentFin
 }
 
 fn check_credit_card(line: &str, line_number: usize, findings: &mut Vec<ContentFinding>) {
-    // Only 13-19 digits in the whole line can be a card number: count them
-    // before building any string (most lines of numeric data have more).
-    let digit_count = line.bytes().filter(u8::is_ascii_digit).count();
-    if !(13..=19).contains(&digit_count) {
+    // Cheap gate: a card number needs at least 13 digits on the line.
+    if line.bytes().filter(u8::is_ascii_digit).count() < 13 {
         return;
     }
-
-    // Extract sequences of 13-19 digits (ignoring spaces and dashes)
-    let digits: String = line
-        .chars()
-        .filter(|c| c.is_ascii_digit() || *c == ' ' || *c == '-')
-        .collect();
-
-    // Try to find card number patterns
-    let pure_digits: String = digits.chars().filter(|c| c.is_ascii_digit()).collect();
-    if pure_digits.len() < 13 || pure_digits.len() > 19 {
-        return;
+    for pure_digits in card_candidates(line) {
+        check_card_digits(&pure_digits, line_number, findings);
+        if findings.last().is_some_and(|f| {
+            f.line_number == line_number && f.secret_type == ContentSecretType::CreditCard
+        }) {
+            return;
+        }
     }
+}
 
+/// Runs of 13 to 19 digits written as one number, optionally grouped by
+/// single spaces or dashes ("4111 1111 1111 1111"). A run that is part of a
+/// decimal number (123.4567890123456), or glued to letters (an id or a
+/// hash), is not a card number.
+fn card_candidates(line: &str) -> Vec<String> {
+    let b = line.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < b.len() {
+        if !b[i].is_ascii_digit() {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        let mut digits = String::new();
+        let mut end = i;
+        while i < b.len() {
+            if b[i].is_ascii_digit() {
+                digits.push(b[i] as char);
+                i += 1;
+                end = i;
+            } else if (b[i] == b' ' || b[i] == b'-') && i + 1 < b.len() && b[i + 1].is_ascii_digit()
+            {
+                i += 1;
+            } else {
+                break;
+            }
+        }
+        let before = start.checked_sub(1).map(|j| b[j]);
+        let after = b.get(end).copied();
+        let after2 = b.get(end + 1).copied();
+        let decimal = matches!(before, Some(b'.') | Some(b','))
+            || (matches!(after, Some(b'.') | Some(b','))
+                && after2.is_some_and(|c| c.is_ascii_digit()));
+        let glued = before.is_some_and(|c| c.is_ascii_alphabetic() || c == b'_')
+            || after.is_some_and(|c| c.is_ascii_alphabetic() || c == b'_');
+        if (13..=19).contains(&digits.len()) && !decimal && !glued {
+            out.push(digits);
+        }
+    }
+    out
+}
+
+fn check_card_digits(pure_digits: &str, line_number: usize, findings: &mut Vec<ContentFinding>) {
     // Check BIN prefix (first 1-2 digits)
     let card_type = match pure_digits.as_bytes()[0] {
         b'4' if pure_digits.len() == 16 => "Visa",
@@ -1303,14 +1371,31 @@ fn check_eth_hex_key(line: &str, line_number: usize, findings: &mut Vec<ContentF
 
     // 64 hex chars near a keyword
     let lower = line.to_lowercase();
-    let has_keyword = lower.contains("private")
-        || lower.contains("key")
-        || lower.contains("wallet")
-        || lower.contains("secret")
-        || lower.contains("hex");
+    // "key" and "hex" alone also sit beside every SHA-256 checksum
+    // ("must_match_key", sha256sum listings); a wallet key comes with words
+    // like these, and a line about hashes is about hashes.
+    let has_keyword = [
+        "private", "priv_key", "privkey", "wallet", "secret", "signer", "mnemonic", "eth_key",
+        "evm",
+    ]
+    .iter()
+    .any(|w| lower.contains(w))
+        && ![
+            "sha256",
+            "sha-256",
+            "sha512",
+            "hash",
+            "digest",
+            "checksum",
+            "etag",
+            "commit",
+            "fingerprint",
+        ]
+        .iter()
+        .any(|w| lower.contains(w));
     if has_keyword {
-        for word in line.split_whitespace() {
-            let trimmed = word.trim_matches(|c: char| !c.is_ascii_hexdigit());
+        // Every run of hex digits, so "PRIVATE_KEY=<hex>" and "0x<hex>" count.
+        for trimmed in line.split(|c: char| !c.is_ascii_hexdigit()) {
             if trimmed.len() == 64
                 && trimmed.chars().all(|c| c.is_ascii_hexdigit())
                 && shannon_entropy(trimmed) >= ENTROPY_THRESHOLD_HEX_KEY
@@ -1341,14 +1426,9 @@ fn check_password_pattern(line: &str, line_number: usize, findings: &mut Vec<Con
 
             for op in ASSIGNMENT_OPS {
                 if trimmed.starts_with(op) {
-                    let value_part = trimmed[op.len()..].trim();
-                    // Strip surrounding quotes
-                    let value = value_part
-                        .trim_start_matches('"')
-                        .trim_start_matches('\'')
-                        .trim_end_matches('"')
-                        .trim_end_matches('\'')
-                        .trim();
+                    let Some(value) = assigned_value(&trimmed[op.len()..]) else {
+                        break;
+                    };
 
                     if value.is_empty() || value.len() < 4 {
                         break;
@@ -1387,6 +1467,52 @@ fn check_password_pattern(line: &str, line_number: usize, findings: &mut Vec<Con
             }
         }
     }
+}
+
+/// The one value a `password: …` style line assigns, or None when what
+/// follows is prose, code or a reference rather than a literal secret:
+/// "PASS: tracking quality 0.93", `token = parser.expect("token:")`,
+/// `pass: ${DB_PASS}`, `token: event_kind`.
+fn assigned_value(after_op: &str) -> Option<&str> {
+    let raw = after_op.trim_start();
+    let first = raw.chars().next()?;
+    let (value, rest, quoted) = if first == '"' || first == '\'' {
+        let inner = &raw[1..];
+        let end = inner.find(first)?;
+        (&inner[..end], &inner[end + 1..], true)
+    } else {
+        let end = raw
+            .find(|c: char| c.is_whitespace() || matches!(c, ',' | ';' | '}' | ']'))
+            .unwrap_or(raw.len());
+        (&raw[..end], &raw[end..], false)
+    };
+    let value = value.trim();
+    // An unquoted value followed by more words is a sentence.
+    if !quoted
+        && rest
+            .trim_start()
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_alphanumeric())
+    {
+        return None;
+    }
+    if value.chars().any(char::is_whitespace)
+        || value.contains(['(', ')'])
+        || value.contains("::")
+        || value.starts_with(['$', '{', '[', '<', '%', '@', '&', '*'])
+    {
+        return None;
+    }
+    // A plain snake_case or kebab-case name is an identifier.
+    if value
+        .chars()
+        .all(|c| c.is_ascii_lowercase() || c == '_' || c == '-' || c == '.')
+        && value.contains(['_', '-', '.'])
+    {
+        return None;
+    }
+    Some(value)
 }
 
 fn check_ssn(line: &str, line_number: usize, findings: &mut Vec<ContentFinding>) {
@@ -2619,6 +2745,107 @@ mod tests {
         assert!(findings
             .iter()
             .any(|f| f.secret_type == ContentSecretType::JwtToken));
+    }
+
+    fn has_card(line: &str) -> bool {
+        check_line(line, 1)
+            .iter()
+            .any(|f| f.secret_type == ContentSecretType::CreditCard)
+    }
+
+    fn has_api_key(line: &str) -> bool {
+        check_line(line, 1)
+            .iter()
+            .any(|f| matches!(f.secret_type, ContentSecretType::ApiKey { .. }))
+    }
+
+    #[test]
+    fn decimal_numbers_are_not_cards() {
+        // The digits either side of the point pass Luhn as 4532015112830366.
+        assert!(!has_card("  \"x\": 453.2015112830366,"));
+        assert!(!has_card("4532015.112830366"));
+        assert!(!has_card("-45.32015112830366"));
+    }
+
+    #[test]
+    fn digits_spread_over_a_line_are_not_a_card() {
+        assert!(!has_card("frame 4532 at 0151 12830 by 366"));
+        assert!(!has_card("id_4532015112830366"));
+    }
+
+    #[test]
+    fn grouped_card_among_other_numbers_is_found() {
+        assert!(has_card("card 4532-0151-1283-0366 exp 12/27 cvv 123"));
+        assert!(has_card("4532 0151 1283 0366"));
+    }
+
+    #[test]
+    fn short_key_prefix_inside_a_word_or_path_is_not_a_key() {
+        assert!(!has_api_key(
+            "path = \"/data/c20_hands_pre_bind_take1_rehearsal_v7_final.json\""
+        ));
+        assert!(!has_api_key(
+            "filter=store_original_frames_and_render_all_takes_v2"
+        ));
+        assert!(!has_api_key(
+            "x = re_render_all_frames_for_the_cafe_scene_now"
+        ));
+        assert!(!has_api_key(
+            "model = \"hf_internal/some-model-name-that-is-long\""
+        ));
+    }
+
+    fn has_password(line: &str) -> bool {
+        check_line(line, 1)
+            .iter()
+            .any(|f| f.secret_type == ContentSecretType::PasswordPattern)
+    }
+
+    #[test]
+    fn password_rule_skips_prose_code_and_names() {
+        assert!(!has_password(
+            "PASS: tracking quality held above threshold on every take"
+        ));
+        assert!(!has_password("token = parser.expect(\"token:\").strip()"));
+        assert!(!has_password("password: ${DB_PASSWORD}"));
+        assert!(!has_password("next_token: event_kind_marker, other: x"));
+        assert!(!has_password(
+            "\"token\":\"Engine::PlayerController(Engine::World&)\""
+        ));
+    }
+
+    #[test]
+    fn password_rule_still_finds_literal_values() {
+        // Synthetic values.
+        assert!(has_password("password = \"Tr0ub4dor&3xQ\""));
+        assert!(has_password("DB_PASSWORD=Zk8#qL2vR9wP"));
+        assert!(has_password("api_token: \"q8Fz2LkP0vN7mX4c\""));
+    }
+
+    fn has_hex_key(line: &str) -> bool {
+        check_line(line, 1)
+            .iter()
+            .any(|f| f.secret_type == ContentSecretType::EthHexKey)
+    }
+
+    #[test]
+    fn checksums_are_not_wallet_keys() {
+        let h = "9f2c4e1a7b3d8f60c5e2a9b1d4f7c3e8a6b0d2f5c9e1a3b7d4f8c2e6a0b5d9f1";
+        assert!(!has_hex_key(&format!("\"must_match_key\": \"{h}\",")));
+        assert!(!has_hex_key(&format!(
+            "{h}  Content/Icons/Key_Handle.uasset"
+        )));
+        assert!(!has_hex_key(&format!("private_key_sha256 = \"{h}\"")));
+        assert!(has_hex_key(&format!("PRIVATE_KEY={h}")));
+        assert!(has_hex_key(&format!("wallet: {h}")));
+    }
+
+    #[test]
+    fn short_key_prefix_with_a_key_shaped_token_is_found() {
+        // Synthetic, Resend-shaped.
+        assert!(has_api_key(
+            "RESEND_API_KEY=re_Ab3dE5fG_h7JkL9mNpQ2rS4tUvW6xYz8"
+        ));
     }
 
     #[test]

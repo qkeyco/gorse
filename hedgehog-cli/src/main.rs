@@ -562,13 +562,7 @@ enum Agent {
 }
 
 fn main() {
-    // Rust ignores SIGPIPE and turns a closed pipe into a write error, which
-    // surfaces as a panic when the user runs `gorse scan | head`. Restore
-    // the conventional behaviour so the process exits quietly instead.
-    #[cfg(unix)]
-    unsafe {
-        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
-    }
+    quiet_on_closed_pipe();
     env_logger::init();
     let cli = Cli::parse();
 
@@ -1405,6 +1399,22 @@ const CATEGORIES: &[&str] = &[
 /// header(2) + categories(13) + divider(1) + total(1) + blank(1) + progress(1) + status(1) = 20
 const DASHBOARD_LINES: usize = 20;
 
+/// Whether this platform has the category at all: Apple Notes exists only
+/// on macOS, so its row is not drawn elsewhere.
+fn category_on_this_platform(cat: &str) -> bool {
+    cat != "Apple Notes" || cfg!(target_os = "macos")
+}
+
+/// Lines the dashboard draws here: `DASHBOARD_LINES` less the category rows
+/// this platform does not have.
+fn dashboard_lines() -> usize {
+    DASHBOARD_LINES
+        - CATEGORIES
+            .iter()
+            .filter(|c| !category_on_this_platform(c))
+            .count()
+}
+
 struct DashboardState {
     counts: [usize; 13],
     total: usize,
@@ -1486,7 +1496,7 @@ impl DashboardState {
         use std::io::Write;
 
         if !self.first_draw {
-            eprint!("\x1b[{DASHBOARD_LINES}A");
+            eprint!("\x1b[{}A", dashboard_lines());
         }
         self.first_draw = false;
 
@@ -1503,6 +1513,9 @@ impl DashboardState {
 
         // Category rows (12 lines) — only show categories with findings, plus always show a few key ones
         for (i, &cat) in CATEGORIES.iter().enumerate() {
+            if !category_on_this_platform(cat) {
+                continue;
+            }
             let count = self.counts[i];
             let color = Self::category_color(cat);
             let bar = Self::bar(count, max_count);
@@ -1963,8 +1976,9 @@ fn cmd_deep_scan(
     };
 
     // Explicit folders come from a caller that owns its own access grants (the
-    // sandboxed scanner app). Only those folders are read; the OCR helper and
-    // the Apple Notes database are outside that grant and are skipped.
+    // sandboxed scanner app). Only those folders are read; the Apple Notes
+    // database is outside that grant and is skipped. Pictures in them are
+    // read only with the app's bundled OCR helper, never the swift tool.
     let explicit = !explicit_paths.is_empty();
     let dirs = if explicit {
         let mut dirs = Vec::new();
@@ -2103,7 +2117,8 @@ fn cmd_deep_scan(
                 let _ = writeln!(std::io::stderr().lock(), "{line}");
             }
         };
-        if !explicit
+        if cfg!(target_os = "macos")
+            && !explicit
             && !interrupt.load(Ordering::Relaxed)
             && !saved.done_phases.iter().any(|p| p == "notes")
         {
@@ -2123,7 +2138,10 @@ fn cmd_deep_scan(
 
         let mut ocr_error: Option<String> = None;
         let mut ocr_attempted = false;
-        if !explicit
+        // Chosen folders get their pictures read too when the app bundles
+        // the OCR helper: it runs inside the same folder grant.
+        let read_images = !explicit || content_scanner::bundled_ocr_helper().is_some();
+        if read_images
             && !interrupt.load(Ordering::Relaxed)
             && !saved.done_phases.iter().any(|p| p == "images")
         {
@@ -2170,11 +2188,7 @@ fn cmd_deep_scan(
                 saved.done_phases.push("images".into());
             }
         }
-        apply_image_coverage(
-            &mut coverage,
-            ocr_attempted || saved.done_phases.iter().any(|p| p == "images"),
-            ocr_error.is_some(),
-        );
+        let images_read = ocr_attempted || saved.done_phases.iter().any(|p| p == "images");
 
         // A resumed scan counts on from where it stopped, and shows what it
         // had already found straight away.
@@ -2352,6 +2366,9 @@ fn cmd_deep_scan(
             }
         }
 
+        // Pictures are counted while the folders are walked, so whether
+        // their text was read is settled only now.
+        apply_image_coverage(&mut coverage, images_read, ocr_error.is_some());
         coverage.interrupted |= interrupt.load(Ordering::Relaxed);
         coverage.finalize();
         if progress {
@@ -2427,8 +2444,14 @@ fn cmd_deep_scan(
     }
 
     // Interactive dashboard mode
-    // +2 for Image OCR phase + Apple Notes phase
-    let mut dashboard = DashboardState::new(dirs.len() + if explicit { 0 } else { 2 }, &config);
+    // +1 for the Image OCR phase, +1 for Apple Notes on macOS
+    let notes_phase = cfg!(target_os = "macos");
+    let extra_phases = if explicit {
+        0
+    } else {
+        1 + usize::from(notes_phase)
+    };
+    let mut dashboard = DashboardState::new(dirs.len() + extra_phases, &config);
     dashboard.status_line = shorten_home(&dirs[0], &home);
     dashboard.draw();
 
@@ -2529,8 +2552,8 @@ fn cmd_deep_scan(
     }
     apply_image_coverage(&mut dashboard.coverage, ocr_attempted, ocr_failed);
 
-    // Scan Apple Notes (only if not interrupted)
-    if !explicit && !interrupt.load(Ordering::Relaxed) {
+    // Scan Apple Notes (macOS only, and only if not interrupted)
+    if notes_phase && !explicit && !interrupt.load(Ordering::Relaxed) {
         dashboard.dirs_done = dirs.len() + 1;
         dashboard.status_line = "Checking Apple Notes...".to_string();
         dashboard.elapsed_secs = start.elapsed().as_secs();
@@ -2564,6 +2587,39 @@ fn cmd_deep_scan(
     dashboard.elapsed_secs = start.elapsed().as_secs();
     dashboard.draw();
     dashboard.print_final();
+    print_wsl_note();
+}
+
+/// The note under WSL: the Linux build checks the Linux side only.
+const WSL_NOTE: &str =
+    "Note: Windows folders under /mnt/c/Users are not checked; run the Windows version of Gorse for those.";
+
+/// Whether this Linux is running under WSL: the WSL interop handler is
+/// registered, WSL set `WSL_DISTRO_NAME`, or the kernel release names
+/// Microsoft.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn is_wsl(interop_registered: bool, distro_name: Option<&str>, kernel_release: &str) -> bool {
+    interop_registered
+        || distro_name.is_some_and(|d| !d.is_empty())
+        || kernel_release.to_ascii_lowercase().contains("microsoft")
+}
+
+/// Print `WSL_NOTE` when running under WSL (text output only; Linux only).
+fn print_wsl_note() {
+    #[cfg(target_os = "linux")]
+    {
+        let interop = ["WSLInterop", "WSLInterop-late"].iter().any(|n| {
+            std::path::Path::new("/proc/sys/fs/binfmt_misc")
+                .join(n)
+                .exists()
+        });
+        let distro = std::env::var("WSL_DISTRO_NAME").ok();
+        let release = std::fs::read_to_string("/proc/sys/kernel/osrelease").unwrap_or_default();
+        if is_wsl(interop, distro.as_deref(), &release) {
+            println!();
+            println!("{WSL_NOTE}");
+        }
+    }
 }
 
 /// Decide how many image files count as content-unchecked. Images are
@@ -3887,6 +3943,7 @@ fn cmd_exposure(
         let color = std::env::var("NO_COLOR").is_err()
             && std::io::IsTerminal::is_terminal(&std::io::stdout());
         print!("{}", exposure::report::render_text(&report, color));
+        print_wsl_note();
     }
     std::process::exit(exposure::exit_code_for(
         &report,
@@ -6179,13 +6236,52 @@ fn cmd_verify_download(file: &std::path::Path, tag: Option<String>, json: bool) 
     }
 }
 
+/// Rust ignores SIGPIPE, so `gorse selftest | head` sees a write error once
+/// `head` closes the pipe, and `println!` turns that into a panic. Restoring
+/// the default signal instead kills the process with status 141, which
+/// shells with `pipefail` report as a failure. Stop quietly with status 0
+/// instead: the reader asked for no more output.
+fn quiet_on_closed_pipe() {
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        if is_closed_pipe_panic(info.payload()) {
+            std::process::exit(0);
+        }
+        default_hook(info);
+    }));
+}
+
+/// Whether a panic is `print!`/`println!` failing because stdout (or
+/// stderr) was closed by its reader.
+fn is_closed_pipe_panic(payload: &(dyn std::any::Any + Send)) -> bool {
+    let message = payload
+        .downcast_ref::<String>()
+        .map(String::as_str)
+        .or_else(|| payload.downcast_ref::<&str>().copied())
+        .unwrap_or("");
+    message.starts_with("failed printing to std")
+        && (message.contains("Broken pipe")
+            || message.contains("os error 32")
+            || message.contains("os error 232"))
+}
+
 fn platform_name() -> &'static str {
     #[cfg(target_os = "macos")]
     return "macOS (ESF)";
     #[cfg(windows)]
     return "Windows (ETW + WFP)";
+    // Name the kernel bridge only when this build has it and the kernel
+    // can run it; otherwise the next line says it is not available.
     #[cfg(target_os = "linux")]
-    return "Linux (eBPF)";
+    {
+        #[cfg(feature = "linux-daemon")]
+        {
+            if hedgehog_linux::check_kernel_version().is_ok() {
+                return "Linux (eBPF)";
+            }
+        }
+        return "Linux";
+    }
     #[cfg(not(any(target_os = "macos", windows, target_os = "linux")))]
     return "Unknown";
 }
@@ -6347,6 +6443,61 @@ fn cmd_engines(cmd: EnginesCommand) {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod linux_tester_tests {
+    use super::*;
+
+    #[test]
+    fn apple_notes_row_is_drawn_on_macos_only() {
+        assert_eq!(
+            category_on_this_platform("Apple Notes"),
+            cfg!(target_os = "macos")
+        );
+        assert!(category_on_this_platform("API Keys"));
+        let rows = CATEGORIES
+            .iter()
+            .filter(|c| category_on_this_platform(c))
+            .count();
+        // header(2) + rows + divider, total, blank, progress, status
+        assert_eq!(dashboard_lines(), 2 + rows + 5);
+        assert_eq!(
+            dashboard_lines(),
+            DASHBOARD_LINES - usize::from(!cfg!(target_os = "macos"))
+        );
+    }
+
+    #[test]
+    fn wsl_is_recognised_by_any_of_its_signs() {
+        assert!(is_wsl(true, None, "6.6.87"));
+        assert!(is_wsl(false, Some("Ubuntu-24.04"), "6.6.87"));
+        assert!(is_wsl(false, None, "5.15.167.4-microsoft-standard-WSL2"));
+        assert!(!is_wsl(false, None, "6.8.0-48-generic"));
+        assert!(!is_wsl(false, Some(""), "6.8.0-48-generic"));
+        assert!(WSL_NOTE.contains("/mnt/c/Users"));
+    }
+
+    #[test]
+    fn platform_names_the_kernel_bridge_only_when_present() {
+        let name = platform_name();
+        if cfg!(all(target_os = "linux", not(feature = "linux-daemon"))) {
+            assert_eq!(name, "Linux");
+        }
+        assert!(!name.is_empty());
+    }
+
+    #[test]
+    fn only_print_failures_on_a_closed_pipe_are_quiet() {
+        let closed = String::from("failed printing to stdout: Broken pipe (os error 32)");
+        assert!(is_closed_pipe_panic(&closed));
+        let windows = "failed printing to stdout: The pipe is being closed. (os error 232)";
+        assert!(is_closed_pipe_panic(&windows));
+        assert!(!is_closed_pipe_panic(&String::from("index out of bounds")));
+        assert!(!is_closed_pipe_panic(&String::from(
+            "called `Result::unwrap()` on an `Err` value: Broken pipe"
+        )));
     }
 }
 

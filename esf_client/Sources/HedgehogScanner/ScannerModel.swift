@@ -461,24 +461,45 @@ final class ScannerModel: ObservableObject {
     }
 
     #if DEBUG
-    /// Development-only smoke test: scans the container's own Documents folder
-    /// (always readable inside the sandbox) and writes the report to the given
-    /// path inside the container. Compiled out of release builds.
-    func runSmokeTest(outputPath: String) async {
+    /// Development-only smoke test: plants a picture of a synthetic token in
+    /// the container's own Documents folder (always readable inside the
+    /// sandbox), scans that folder and prints the result as JSON on stdout,
+    /// so nothing outside the container has to be touched. Compiled out of
+    /// release builds.
+    func runSmokeTest() async {
         let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        let picture = documents.appendingPathComponent("gorse-smoke.png")
+        Self.drawSyntheticToken(to: picture)
         var result: [String: Any] = [:]
         do {
             let report = try await ScanRunner.scan(folders: [documents])
             result["ok"] = true
             result["total"] = report.total
-            result["categories"] = Array(Set(report.findings.map(\.category))).sorted()
-            result["paths"] = report.findings.map(\.path)
+            result["kinds"] = report.findings.map(\.kind)
+            result["files"] = report.findings.map { URL(fileURLWithPath: $0.path).lastPathComponent }
+            result["images_not_checked"] = report.coverage?.images_content_not_checked
         } catch {
             result["ok"] = false
             result["error"] = error.localizedDescription
         }
-        let data = try? JSONSerialization.data(withJSONObject: result, options: [.sortedKeys])
-        try? data?.write(to: URL(fileURLWithPath: outputPath))
+        try? FileManager.default.removeItem(at: picture)
+        let data = (try? JSONSerialization.data(withJSONObject: result, options: [.sortedKeys])) ?? Data()
+        FileHandle.standardOutput.write(data + Data("\n".utf8))
+    }
+
+    /// A screenshot-like picture holding a made-up GitHub token.
+    private static func drawSyntheticToken(to url: URL) {
+        let alphabet = Array("abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789")
+        let token = "ghp_" + String((0..<36).map { _ in alphabet.randomElement()! })
+        let size = NSSize(width: 1800, height: 700)
+        let image = NSImage(size: size)
+        image.lockFocus()
+        NSGradient(starting: .white, ending: NSColor(white: 0.93, alpha: 1))?.draw(in: NSRect(origin: .zero, size: size), angle: 35)
+        let attributes: [NSAttributedString.Key: Any] = [.font: NSFont.monospacedSystemFont(ofSize: 34, weight: .regular), .foregroundColor: NSColor.black]
+        ("export GITHUB_TOKEN=" + token as NSString).draw(at: NSPoint(x: 60, y: 380), withAttributes: attributes)
+        image.unlockFocus()
+        guard let tiff = image.tiffRepresentation, let bitmap = NSBitmapImageRep(data: tiff) else { return }
+        try? bitmap.representation(using: .png, properties: [:])?.write(to: url)
     }
     #endif
 }

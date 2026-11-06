@@ -123,6 +123,24 @@ fn version_shows_version() {
     );
 }
 
+/// `gorse version | head -0`: the reader is gone before the first line is
+/// written. The command ends quietly with status 0, not killed by SIGPIPE
+/// (141 in a shell) and not a panic (101).
+#[test]
+fn a_closed_stdout_pipe_ends_quietly_with_status_zero() {
+    let (reader, writer) = std::io::pipe().expect("pipe");
+    drop(reader);
+    let output = hedgehog_bin()
+        .arg("version")
+        .stdout(writer)
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .expect("Failed to run gorse");
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!stderr.contains("panicked"), "{stderr}");
+}
+
 #[test]
 fn status_shows_info() {
     let output = hedgehog_bin()

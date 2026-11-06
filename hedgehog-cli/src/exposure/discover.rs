@@ -271,6 +271,7 @@ pub const SOURCES: &[Source] = &[
     ("secrets-manager-clis", secrets_managers),
     ("github-cli", github),
     ("ci-tokens", other_ci),
+    ("ai-agent-credentials", ai_agents),
     ("docker-config", docker),
     ("kubeconfig", kubernetes),
     ("terraform-credentials", terraform),
@@ -1452,6 +1453,55 @@ fn other_ci(ctx: &mut Context) -> Vec<Discovered> {
             node: NodeKind::ProductionService,
             token_key: "token",
         },
+        // Linux: the CLI keeps its global config in the XDG data folder
+        // (documented), and some releases used ~/.config/vercel.
+        Src {
+            rel: ".local/share/com.vercel.cli/auth.json",
+            name: "Vercel CLI",
+            target: "Vercel",
+            kind: CredentialKind::CiToken,
+            edge: EdgeKind::CanDeploy,
+            node: NodeKind::ProductionService,
+            token_key: "token",
+        },
+        Src {
+            rel: ".config/vercel/auth.json",
+            name: "Vercel CLI",
+            target: "Vercel",
+            kind: CredentialKind::CiToken,
+            edge: EdgeKind::CanDeploy,
+            node: NodeKind::ProductionService,
+            token_key: "token",
+        },
+        // Cloudflare Wrangler: `oauth_token` after `wrangler login`,
+        // `api_token` when set by hand. Linux, macOS, then the legacy folder.
+        Src {
+            rel: ".config/.wrangler/config/default.toml",
+            name: "Cloudflare Wrangler",
+            target: "Cloudflare",
+            kind: CredentialKind::CiToken,
+            edge: EdgeKind::CanDeploy,
+            node: NodeKind::ProductionService,
+            token_key: "_token",
+        },
+        Src {
+            rel: "Library/Preferences/.wrangler/config/default.toml",
+            name: "Cloudflare Wrangler",
+            target: "Cloudflare",
+            kind: CredentialKind::CiToken,
+            edge: EdgeKind::CanDeploy,
+            node: NodeKind::ProductionService,
+            token_key: "_token",
+        },
+        Src {
+            rel: ".wrangler/config/default.toml",
+            name: "Cloudflare Wrangler",
+            target: "Cloudflare",
+            kind: CredentialKind::CiToken,
+            edge: EdgeKind::CanDeploy,
+            node: NodeKind::ProductionService,
+            token_key: "_token",
+        },
         Src {
             rel: ".config/netlify/config.json",
             name: "Netlify CLI",
@@ -1527,6 +1577,47 @@ fn other_ci(ctx: &mut Context) -> Vec<Discovered> {
             source: Some(p.clone()),
         });
     }
+    // Supabase CLI: the access token alone in a file.
+    for rel in [".config/supabase/access-token", ".supabase/access-token"] {
+        let p = ctx.path(rel);
+        let Some(text) = ctx.read(&p) else { continue };
+        let token = text.trim();
+        if token.is_empty() {
+            continue;
+        }
+        if token.len() < 8 || token.contains(char::is_whitespace) {
+            ctx.could_not_interpret(&p);
+            continue;
+        }
+        let mut c = DiscoveredCredential::new(
+            CredentialKind::CiToken,
+            "Supabase CLI",
+            &ctx.display(&p),
+            "Supabase",
+        );
+        c.fingerprint = Fingerprint::from_secret(token.as_bytes());
+        c.evidence.push("token stored in plaintext config".into());
+        c.evidence
+            .push("deployment platform tokens publish to production by default".into());
+        c.permissions.lifetime = Lifetime::Unknown;
+        c.permissions.assurance = Assurance::Inferred;
+        c.permissions.can_modify_production = Capability::Yes;
+        c.persistence = Persistence::IndependentCredential;
+        let links = vec![Link::new(
+            NodeKind::ProductionService,
+            "Supabase",
+            EdgeKind::CanDeploy,
+            Assurance::Inferred,
+        )
+        .evidence("Supabase CLI configured")
+        .production(true)];
+        out.push(Discovered {
+            credential: c,
+            links,
+            verify_key: None,
+            source: Some(p.clone()),
+        });
+    }
     // Heroku / generic .netrc
     let netrc = ctx.path(".netrc");
     if let Some(text) = ctx.read(&netrc) {
@@ -1590,6 +1681,304 @@ fn ci_config_understood(rel: &str, text: &str) -> bool {
             .all(|l| l.find('=').is_some_and(|i| !l[..i].trim().is_empty()));
     }
     true
+}
+
+// ─── AI coding agents and MCP configs ────────────────────────────────────────
+
+/// How an AI agent's file is laid out.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AgentFormat {
+    /// JSON: every string under a secret-looking key counts.
+    Json,
+    /// `key: value` or `key = value` lines (YAML, TOML).
+    Lines,
+    /// The token alone in the file.
+    Raw,
+}
+
+struct AgentFile {
+    rel: &'static str,
+    name: &'static str,
+    target: &'static str,
+    kind: CredentialKind,
+    format: AgentFormat,
+    /// A sign-in file: content with no credential in it is a format Gorse
+    /// does not understand (lost coverage). A config file without secrets
+    /// is just a config file.
+    sign_in: bool,
+}
+
+const fn agent(
+    rel: &'static str,
+    name: &'static str,
+    target: &'static str,
+    kind: CredentialKind,
+    format: AgentFormat,
+    sign_in: bool,
+) -> AgentFile {
+    AgentFile {
+        rel,
+        name,
+        target,
+        kind,
+        format,
+        sign_in,
+    }
+}
+
+/// Sign-in files of AI coding agents and the configs (MCP servers above
+/// all) where people write API keys literally. The same home-relative
+/// paths on macOS and Linux; on Windows the CLIs use the same folders
+/// under %USERPROFILE%.
+#[rustfmt::skip]
+const AGENT_FILES: &[AgentFile] = &[
+    agent(".claude/.credentials.json", "Claude Code sign-in", "Anthropic (Claude)", CredentialKind::OAuthSession, AgentFormat::Json, true),
+    agent(".claude.json", "Claude Code config", "Anthropic (Claude)", CredentialKind::ApiKey, AgentFormat::Json, false),
+    agent(".claude/settings.json", "Claude Code settings", "Anthropic (Claude)", CredentialKind::ApiKey, AgentFormat::Json, false),
+    agent(".gemini/oauth_creds.json", "Gemini CLI sign-in", "Google (Gemini)", CredentialKind::OAuthSession, AgentFormat::Json, true),
+    agent(".gemini/mcp-oauth-tokens.json", "Gemini CLI MCP sign-ins", "MCP servers", CredentialKind::OAuthSession, AgentFormat::Json, false),
+    agent(".gemini/settings.json", "Gemini CLI settings", "MCP servers", CredentialKind::ApiKey, AgentFormat::Json, false),
+    agent(".codex/auth.json", "Codex CLI sign-in", "OpenAI", CredentialKind::OAuthSession, AgentFormat::Json, true),
+    agent(".codex/config.toml", "Codex CLI config", "MCP servers", CredentialKind::ApiKey, AgentFormat::Lines, false),
+    agent(".cursor/auth.json", "Cursor CLI sign-in", "Cursor", CredentialKind::OAuthSession, AgentFormat::Json, true),
+    agent(".cursor/mcp.json", "Cursor MCP config", "MCP servers", CredentialKind::ApiKey, AgentFormat::Json, false),
+    agent(".qwen/oauth_creds.json", "Qwen Code sign-in", "Qwen", CredentialKind::OAuthSession, AgentFormat::Json, true),
+    agent(".local/share/opencode/auth.json", "OpenCode sign-in", "AI model providers", CredentialKind::OAuthSession, AgentFormat::Json, true),
+    agent(".config/github-copilot/hosts.json", "GitHub Copilot sign-in", "GitHub Copilot", CredentialKind::OAuthSession, AgentFormat::Json, true),
+    agent(".config/github-copilot/apps.json", "GitHub Copilot sign-in", "GitHub Copilot", CredentialKind::OAuthSession, AgentFormat::Json, true),
+    agent("Library/Application Support/Claude/claude_desktop_config.json", "Claude Desktop MCP config", "MCP servers", CredentialKind::ApiKey, AgentFormat::Json, false),
+    agent(".config/Claude/claude_desktop_config.json", "Claude Desktop MCP config", "MCP servers", CredentialKind::ApiKey, AgentFormat::Json, false),
+    agent("Library/Application Support/Code/User/mcp.json", "VS Code MCP config", "MCP servers", CredentialKind::ApiKey, AgentFormat::Json, false),
+    agent(".config/Code/User/mcp.json", "VS Code MCP config", "MCP servers", CredentialKind::ApiKey, AgentFormat::Json, false),
+    agent(".codeium/windsurf/mcp_config.json", "Windsurf MCP config", "MCP servers", CredentialKind::ApiKey, AgentFormat::Json, false),
+    agent(".config/devin/mcp_config.json", "Devin MCP config", "MCP servers", CredentialKind::ApiKey, AgentFormat::Json, false),
+    agent(".continue/config.yaml", "Continue config", "AI model providers", CredentialKind::ApiKey, AgentFormat::Lines, false),
+    agent(".aider.conf.yml", "Aider config", "AI model providers", CredentialKind::ApiKey, AgentFormat::Lines, false),
+    agent(".cache/huggingface/token", "Hugging Face token", "Hugging Face", CredentialKind::ApiKey, AgentFormat::Raw, true),
+    agent(".huggingface/token", "Hugging Face token", "Hugging Face", CredentialKind::ApiKey, AgentFormat::Raw, true),
+];
+
+/// Whether a config key names secret material: `accessToken`,
+/// `refresh_token`, `apiKey`, `GITHUB_TOKEN`, `client_secret`,
+/// `Authorization`. Not `token_type`, `max_tokens` or `apiKeyHelper`.
+fn agent_secret_key(key: &str) -> bool {
+    let k: String = key
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .map(|c| c.to_ascii_lowercase())
+        .collect();
+    [
+        "token",
+        "apikey",
+        "secret",
+        "password",
+        "accesskey",
+        "authorization",
+    ]
+    .iter()
+    .any(|end| k.ends_with(end))
+        || matches!(k.as_str(), "key" | "access" | "refresh")
+}
+
+/// Whether a value is written literally, not a reference to somewhere
+/// else (`${GITHUB_TOKEN}`, `{env:KEY}`, `op://vault/item`).
+fn agent_literal_value(v: &str) -> bool {
+    let v = v.trim();
+    v.len() >= 8
+        && !v.starts_with('$')
+        && !v.contains("${")
+        && !v.contains("{env:")
+        && !v.starts_with("env:")
+        && !v.starts_with("op://")
+}
+
+/// Secret-keyed literal strings in a JSON document: (key, value) pairs.
+fn agent_json_secrets<'v>(v: &'v serde_json::Value, out: &mut Vec<(String, &'v str)>) {
+    match v {
+        serde_json::Value::Object(map) => {
+            for (k, val) in map {
+                match val {
+                    serde_json::Value::String(s)
+                        if agent_secret_key(k) && agent_literal_value(s) =>
+                    {
+                        out.push((k.clone(), s.as_str()))
+                    }
+                    _ => agent_json_secrets(val, out),
+                }
+            }
+        }
+        serde_json::Value::Array(items) => items.iter().for_each(|i| agent_json_secrets(i, out)),
+        _ => {}
+    }
+}
+
+/// Secret-keyed literal values on `key: value` / `key = value` lines.
+fn agent_line_secrets(text: &str) -> Vec<(String, &str)> {
+    let unquote = |s: &str| {
+        s.trim()
+            .trim_end_matches(',')
+            .trim()
+            .trim_matches(|c| c == '"' || c == '\'')
+            .to_string()
+    };
+    let mut out = Vec::new();
+    for line in text.lines() {
+        let l = line.trim().trim_start_matches("- ");
+        if l.starts_with('#') || l.starts_with("//") {
+            continue;
+        }
+        let Some(i) = l.find([':', '=']) else {
+            continue;
+        };
+        let key = unquote(&l[..i]);
+        let raw = l[i + 1..].trim();
+        let value = raw
+            .trim_end_matches(',')
+            .trim()
+            .trim_matches(|c| c == '"' || c == '\'');
+        if agent_secret_key(&key)
+            && agent_literal_value(value)
+            && !value.contains(char::is_whitespace)
+        {
+            out.push((key, value));
+        }
+    }
+    out
+}
+
+/// An expiry written in the file (`expiresAt`, `expiry_date`, `expires`),
+/// in seconds; milliseconds are converted.
+fn agent_expiry(v: &serde_json::Value) -> Option<u64> {
+    match v {
+        serde_json::Value::Object(map) => {
+            for (k, val) in map {
+                let lower = k.to_ascii_lowercase().replace('_', "");
+                if matches!(
+                    lower.as_str(),
+                    "expiresat" | "expirydate" | "expires" | "expiry"
+                ) {
+                    if let Some(n) = val.as_u64() {
+                        return Some(if n > 100_000_000_000 { n / 1000 } else { n });
+                    }
+                }
+                if let Some(t) = agent_expiry(val) {
+                    return Some(t);
+                }
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+fn ai_agents(ctx: &mut Context) -> Vec<Discovered> {
+    let mut out = Vec::new();
+    for f in AGENT_FILES {
+        let p = ctx.path(f.rel);
+        let Some(text) = ctx.read(&p) else { continue };
+        let text = text.trim_start_matches('\u{feff}');
+        if text.trim().is_empty() {
+            continue;
+        }
+        let json = match f.format {
+            AgentFormat::Json => match serde_json::from_str::<serde_json::Value>(text) {
+                Ok(v) => Some(v),
+                // A sign-in file that is not JSON is unreadable; a config
+                // may be JSON with comments, which the line reader handles.
+                Err(_) if f.sign_in => {
+                    ctx.could_not_interpret(&p);
+                    continue;
+                }
+                Err(_) => None,
+            },
+            _ => None,
+        };
+        if json
+            .as_ref()
+            .is_some_and(|v| v.as_object().is_some_and(|m| m.is_empty()))
+        {
+            continue; // `{}`: signed out
+        }
+        let secrets: Vec<(String, &str)> = match (&json, f.format) {
+            (Some(v), _) => {
+                let mut s = Vec::new();
+                agent_json_secrets(v, &mut s);
+                s
+            }
+            (None, AgentFormat::Raw) => {
+                let t = text.trim();
+                if t.len() >= 8 && !t.contains(char::is_whitespace) {
+                    vec![("token".to_string(), t)]
+                } else {
+                    Vec::new()
+                }
+            }
+            (None, _) => agent_line_secrets(text),
+        };
+        if secrets.is_empty() {
+            if f.sign_in {
+                ctx.could_not_interpret(&p);
+            }
+            continue;
+        }
+        let refresh = secrets
+            .iter()
+            .any(|(k, _)| k.to_ascii_lowercase().contains("refresh"));
+        let mut material = Vec::new();
+        for (_, v) in &secrets {
+            material.extend_from_slice(v.as_bytes());
+            material.push(0);
+        }
+        let mut c = DiscoveredCredential::new(f.kind, f.name, &ctx.display(&p), f.target);
+        c.fingerprint = Fingerprint::from_secret(&material);
+        c.permissions.assurance = Assurance::Inferred;
+        c.persistence = Persistence::IndependentCredential;
+        if f.sign_in {
+            c.evidence.push(
+                "sign-in token stored in a plaintext file: a copy works from another machine"
+                    .into(),
+            );
+        } else {
+            let mut keys: Vec<&str> = secrets.iter().map(|(k, _)| k.as_str()).collect();
+            keys.sort_unstable();
+            keys.dedup();
+            let shown: Vec<&str> = keys.iter().take(5).copied().collect();
+            let more = if keys.len() > shown.len() {
+                format!(" and {} more", keys.len() - shown.len())
+            } else {
+                String::new()
+            };
+            c.evidence.push(redact_text(&format!(
+                "secrets written literally in the config ({}{more})",
+                shown.join(", ")
+            )));
+        }
+        c.permissions.lifetime = if refresh {
+            c.evidence
+                .push("refresh token: renews access until signed out or revoked".into());
+            Lifetime::LongLived
+        } else {
+            match json.as_ref().and_then(agent_expiry) {
+                Some(t) if t <= ctx.now => Lifetime::ExpiredAt(t),
+                Some(t) => Lifetime::ExpiresAt(t),
+                None => Lifetime::Unknown,
+            }
+        };
+        let links = vec![Link::new(
+            NodeKind::Other,
+            f.target,
+            EdgeKind::CanAuthenticate,
+            Assurance::Inferred,
+        )
+        .evidence(&format!("{} found", f.name))];
+        out.push(Discovered {
+            credential: c,
+            links,
+            verify_key: None,
+            source: Some(p.clone()),
+        });
+    }
+    out
 }
 
 // ─── Docker registries ───────────────────────────────────────────────────────
@@ -4806,6 +5195,182 @@ mod tests {
                 );
             }
         }
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    #[test]
+    fn ai_agent_sign_ins_are_assessed_on_every_platform() {
+        // The tester's Linux repro: synthetic sign-ins of four agents.
+        let home = fixture_home();
+        write(
+            &home,
+            ".claude/.credentials.json",
+            r#"{"claudeAiOauth":{"accessToken":"sk-ant-oat01-FAKE","refreshToken":"sk-ant-ort01-FAKE","expiresAt":1900000000000,"scopes":["user:inference"]}}"#,
+        );
+        write(
+            &home,
+            ".gemini/oauth_creds.json",
+            r#"{"access_token":"ya29.FAKE-synthetic","refresh_token":"1//FAKE-synthetic","token_type":"Bearer","expiry_date":1900000000000}"#,
+        );
+        write(
+            &home,
+            ".codex/auth.json",
+            r#"{"tokens":{"access_token":"eyJFAKE.eyJFAKE.FAKE","refresh_token":"FAKE-synthetic"}}"#,
+        );
+        write(
+            &home,
+            ".cursor/auth.json",
+            r#"{"accessToken":"eyJFAKE.eyJFAKE.FAKE"}"#,
+        );
+        // An MCP config with one literal key and one reference.
+        write(
+            &home,
+            ".cursor/mcp.json",
+            r#"{"mcpServers":{"gh":{"env":{"GITHUB_TOKEN":"ghp_FAKEsynthetic","OTHER":"${OTHER_TOKEN}"}}}}"#,
+        );
+        let (found, failures, coverage) = run_home(&home);
+        assert!(failures.is_empty(), "{:?}", reasons(&failures));
+        assert!(
+            coverage
+                .assessed
+                .iter()
+                .any(|s| s == "ai-agent-credentials"),
+            "{:?}",
+            coverage.assessed
+        );
+        let agents: Vec<&Discovered> = found
+            .iter()
+            .filter(|(_, id)| *id == "ai-agent-credentials")
+            .map(|(d, _)| d)
+            .collect();
+        let locations: Vec<String> = agents
+            .iter()
+            .map(|d| d.credential.location.replace('\\', "/"))
+            .collect();
+        for rel in [
+            "~/.claude/.credentials.json",
+            "~/.gemini/oauth_creds.json",
+            "~/.codex/auth.json",
+            "~/.cursor/auth.json",
+            "~/.cursor/mcp.json",
+        ] {
+            assert!(locations.iter().any(|l| l == rel), "{rel}: {locations:?}");
+        }
+        assert_eq!(agents.len(), 5, "{locations:?}");
+        let claude = agents
+            .iter()
+            .find(|d| d.credential.location.contains(".claude"))
+            .unwrap();
+        assert_eq!(claude.credential.kind, CredentialKind::OAuthSession);
+        assert_eq!(claude.credential.permissions.lifetime, Lifetime::LongLived);
+        // Cursor has no refresh token and no expiry.
+        let cursor = agents
+            .iter()
+            .find(|d| {
+                d.credential.location.ends_with("auth.json")
+                    && d.credential.name.starts_with("Cursor")
+            })
+            .unwrap();
+        assert_eq!(cursor.credential.permissions.lifetime, Lifetime::Unknown);
+        // The MCP finding names the key, never the value or the reference.
+        let mcp = agents
+            .iter()
+            .find(|d| d.credential.location.ends_with("mcp.json"))
+            .unwrap();
+        assert!(
+            mcp.credential
+                .evidence
+                .iter()
+                .any(|e| e.contains("GITHUB_TOKEN")),
+            "{:?}",
+            mcp.credential.evidence
+        );
+        // No secret value reaches the findings.
+        let dump = format!("{agents:?}");
+        for secret in [
+            "sk-ant-",
+            "ya29.",
+            "1//FAKE",
+            "eyJFAKE",
+            "ghp_FAKE",
+            "FAKE-synthetic",
+        ] {
+            assert!(!dump.contains(secret), "{secret} leaked");
+        }
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    #[test]
+    fn unreadable_ai_agent_sign_ins_are_lost_coverage_and_configs_are_not() {
+        let home = fixture_home();
+        write(&home, ".claude/.credentials.json", "not json");
+        write(&home, ".codex/auth.json", r#"{"mode":"chatgpt"}"#);
+        // Signed out, and a JSONC config with no secrets.
+        write(&home, ".cursor/auth.json", "{}");
+        write(
+            &home,
+            ".config/Code/User/mcp.json",
+            "// my servers\n{\"servers\": {}}\n",
+        );
+        let (found, failures, coverage) = run_home(&home);
+        let reasons = reasons(&failures);
+        for rel in [".claude/.credentials.json", ".codex/auth.json"] {
+            let expected = format!("could not interpret ~/{rel} (unsupported format)");
+            assert!(
+                reasons.iter().any(|r| r.replace('\\', "/") == expected),
+                "{expected}: {reasons:?}"
+            );
+        }
+        assert_eq!(reasons.len(), 2, "{reasons:?}");
+        assert!(coverage
+            .unavailable
+            .iter()
+            .any(|(s, _)| s == "ai-agent-credentials"));
+        assert!(found.iter().all(|(_, id)| *id != "ai-agent-credentials"));
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    #[test]
+    fn linux_deployment_platform_tokens_are_found() {
+        let home = fixture_home();
+        write(
+            &home,
+            ".local/share/com.vercel.cli/auth.json",
+            r#"{"token":"vercel_synthetic_xdg"}"#,
+        );
+        write(
+            &home,
+            ".config/vercel/auth.json",
+            r#"{"token":"vercel_synthetic_config"}"#,
+        );
+        write(
+            &home,
+            ".config/.wrangler/config/default.toml",
+            "oauth_token = \"wrangler_synthetic\"\nexpiration_time = \"2030-01-01T00:00:00Z\"\n",
+        );
+        write(
+            &home,
+            ".config/supabase/access-token",
+            "sbp_synthetic0000\n",
+        );
+        let (found, failures, coverage) = run_home(&home);
+        assert!(failures.is_empty(), "{:?}", reasons(&failures));
+        assert!(coverage.assessed.iter().any(|s| s == "ci-tokens"));
+        let locations: Vec<String> = found
+            .iter()
+            .filter(|(_, id)| *id == "ci-tokens")
+            .map(|(d, _)| d.credential.location.replace('\\', "/"))
+            .collect();
+        for rel in [
+            "~/.local/share/com.vercel.cli/auth.json",
+            "~/.config/vercel/auth.json",
+            "~/.config/.wrangler/config/default.toml",
+            "~/.config/supabase/access-token",
+        ] {
+            assert!(locations.iter().any(|l| l == rel), "{rel}: {locations:?}");
+        }
+        let dump = format!("{found:?}");
+        assert!(!dump.contains("synthetic"), "a token value leaked");
         std::fs::remove_dir_all(&home).ok();
     }
 

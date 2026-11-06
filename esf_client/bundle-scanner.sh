@@ -26,6 +26,7 @@
 #     Resources/AppIcon.icns
 #     MacOS/HedgehogScanner           (universal SwiftUI app)
 #     MacOS/gorse-cli              (universal Rust CLI, sandbox-inheriting)
+#     MacOS/gorse-ocr              (universal Vision text reader, sandbox-inheriting)
 #
 # The app carries App Sandbox with user-selected read-only file access; the
 # CLI carries App Sandbox plus inherit and nothing else. No network, no
@@ -78,11 +79,15 @@ if [[ "$SKIP_BUILD" == 0 ]]; then
     echo "Building universal Swift app ($CONFIG)..."
     (cd "$SCRIPT_DIR" && HEDGEHOG_SKIP_ESF=1 swift build -c "$CONFIG" --product HedgehogScanner \
         --arch arm64 --arch x86_64 --scratch-path "$SCRATCH")
+    echo "Building universal OCR helper..."
+    (cd "$SCRIPT_DIR" && HEDGEHOG_SKIP_ESF=1 swift build -c release --product GorseOCR \
+        --arch arm64 --arch x86_64 --scratch-path "$SCRATCH")
 fi
 
 CLI_BIN="$ROOT/target/scanner/gorse-cli"
 SWIFT_BIN="$SCRATCH/apple/Products/$(tr '[:lower:]' '[:upper:]' <<< "${CONFIG:0:1}")${CONFIG:1}/HedgehogScanner"
-for bin in "$CLI_BIN" "$SWIFT_BIN"; do
+OCR_BIN="$SCRATCH/apple/Products/Release/GorseOCR"
+for bin in "$CLI_BIN" "$SWIFT_BIN" "$OCR_BIN"; do
     [[ -x "$bin" ]] || { echo "Missing build product: $bin" >&2; exit 1; }
     for arch in arm64 x86_64; do
         lipo "$bin" -verify_arch "$arch" || { echo "$bin lacks $arch" >&2; exit 1; }
@@ -111,8 +116,12 @@ rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$INFO_PLIST" "$APP/Contents/Info.plist"
 cp "$ICNS" "$APP/Contents/Resources/AppIcon.icns"
+cp "$RESOURCES_DIR/ScannerPrivacyInfo.xcprivacy" "$APP/Contents/Resources/PrivacyInfo.xcprivacy"
+cp "$ROOT/LICENSE" "$APP/Contents/Resources/LICENSE"
+cp "$ROOT/LICENSE-THIRD-PARTY" "$APP/Contents/Resources/LICENSE-THIRD-PARTY"
 cp "$SWIFT_BIN" "$APP/Contents/MacOS/HedgehogScanner"
 cp "$CLI_BIN" "$APP/Contents/MacOS/gorse-cli"
+cp "$OCR_BIN" "$APP/Contents/MacOS/gorse-ocr"
 chmod 755 "$APP/Contents/MacOS/"*
 if [[ -n "$PROFILE" ]]; then
     cp "$PROFILE" "$APP/Contents/embedded.provisionprofile"
@@ -147,6 +156,7 @@ else
 fi
 # Inside-out: the helper first, then the app, which seals the helper's hash.
 sign "$APP/Contents/MacOS/gorse-cli" "$CLI_ENTITLEMENTS" "is.hedgehog.scanner.cli"
+sign "$APP/Contents/MacOS/gorse-ocr" "$CLI_ENTITLEMENTS" "is.hedgehog.scanner.ocr"
 sign "$APP" "$APP_ENT" "is.hedgehog.scanner"
 
 echo "Verifying signature..."

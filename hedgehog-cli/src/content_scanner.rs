@@ -2596,10 +2596,61 @@ fn parse_ocr_results(ocr_output: &str) -> Vec<ScanResult> {
     results
 }
 
-/// macOS: use Vision framework via a Swift helper script.
+/// The OCR helper the Mac apps bundle beside the CLI (`gorse-ocr`, Apple
+/// Vision), or the one `GORSE_OCR_HELPER` names. None for a bare CLI.
+#[cfg(target_os = "macos")]
+pub fn bundled_ocr_helper() -> Option<PathBuf> {
+    if let Some(path) = std::env::var_os("GORSE_OCR_HELPER") {
+        let path = PathBuf::from(path);
+        return path.is_file().then_some(path);
+    }
+    let exe = std::env::current_exe().ok()?;
+    let helper = exe.parent()?.join("gorse-ocr");
+    helper.is_file().then_some(helper)
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn bundled_ocr_helper() -> Option<PathBuf> {
+    None
+}
+
+/// True when the developer tools are installed, so `swift` runs a script
+/// instead of asking the person to install the tools.
+#[cfg(target_os = "macos")]
+fn developer_tools_installed() -> bool {
+    std::process::Command::new("/usr/bin/xcode-select")
+        .arg("-p")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+/// macOS: Apple Vision, through the bundled `gorse-ocr` helper when the CLI
+/// runs inside a Mac app, otherwise through a Swift script when the
+/// developer tools are installed.
 #[cfg(target_os = "macos")]
 fn run_platform_ocr(image_paths: &[PathBuf]) -> Result<String, String> {
     use std::process::{Command, Stdio};
+
+    if let Some(helper) = bundled_ocr_helper() {
+        let output = Command::new(&helper)
+            .args(image_paths)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .output()
+            .map_err(|e| format!("Failed to run the OCR helper: {e}"))?;
+        if !output.status.success() {
+            return Err("The OCR helper failed".to_string());
+        }
+        return String::from_utf8(output.stdout)
+            .map_err(|e| format!("OCR output encoding error: {e}"));
+    }
+    if !developer_tools_installed() {
+        return Err("Text in pictures is read by the Gorse app; the command-line tool alone cannot read it on this Mac".to_string());
+    }
 
     let swift_code = r#"
 import Foundation
