@@ -765,6 +765,29 @@ pub fn check_line(line: &str, line_number: usize) -> Vec<ContentFinding> {
         return findings;
     }
 
+    // Fast path for numeric data: plain-ASCII lines whose only letters, if
+    // any, are `e`/`E` (CSV and TSV rows, instrument logs, scientific
+    // notation such as `-9.98E-7`). Every other check needs a letter other
+    // than e to match (key prefixes, keywords, schemes, PEM headers, `0x`,
+    // `eyJ`, markings), and ASCII text has no case mapping that could make
+    // one. Only the checks that can match digits, punctuation and `e`/`E`
+    // run, in their usual order: card numbers, WIF keys (base58 includes
+    // digits and e/E), SSNs and IBANs (`EE` is Estonia). This skips the
+    // dozens of substring searches per line that dominate a scan of data
+    // files. A new check that can match such a line must be added here and
+    // to `check_line_all_checks` in the tests.
+    if line.is_ascii()
+        && line
+            .bytes()
+            .all(|b| !b.is_ascii_alphabetic() || b == b'e' || b == b'E')
+    {
+        check_credit_card(line, line_number, &mut findings);
+        check_wif_key(line, line_number, &mut findings);
+        check_ssn(line, line_number, &mut findings);
+        check_iban(line, line_number, &mut findings);
+        return findings;
+    }
+
     // Tier 1: Definitive
     check_pem_header(line, line_number, &mut findings);
     check_aws_access_key(line, line_number, &mut findings);
@@ -1138,6 +1161,13 @@ fn check_jwt_token(line: &str, line_number: usize, findings: &mut Vec<ContentFin
 }
 
 fn check_credit_card(line: &str, line_number: usize, findings: &mut Vec<ContentFinding>) {
+    // Only 13-19 digits in the whole line can be a card number: count them
+    // before building any string (most lines of numeric data have more).
+    let digit_count = line.bytes().filter(u8::is_ascii_digit).count();
+    if !(13..=19).contains(&digit_count) {
+        return;
+    }
+
     // Extract sequences of 13-19 digits (ignoring spaces and dashes)
     let digits: String = line
         .chars()
@@ -2428,6 +2458,77 @@ fn is_bip39_word(word: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every check `check_line` can run, without the letter-free fast path.
+    fn check_line_all_checks(line: &str, n: usize) -> Vec<ContentFinding> {
+        let mut f = Vec::new();
+        check_pem_header(line, n, &mut f);
+        check_aws_access_key(line, n, &mut f);
+        check_api_key_prefixes(line, n, &mut f);
+        check_google_service_account(line, n, &mut f);
+        check_webhook_urls(line, n, &mut f);
+        check_azure_patterns(line, n, &mut f);
+        check_jwt_token(line, n, &mut f);
+        check_credit_card(line, n, &mut f);
+        check_db_connection_string(line, n, &mut f);
+        check_wif_key(line, n, &mut f);
+        check_eth_hex_key(line, n, &mut f);
+        check_uri_credentials(line, n, &mut f);
+        check_password_pattern(line, n, &mut f);
+        check_ssn(line, n, &mut f);
+        check_iban(line, n, &mut f);
+        check_sensitive_markings(line, n, &mut f);
+        f
+    }
+
+    #[test]
+    fn letter_free_fast_path_matches_the_full_checks() {
+        let lines = [
+            "4111 1111 1111 1111",
+            "4111-1111-1111-1111",
+            "378282246310005",
+            "123-45-6789",
+            "card: 4111111111111111",
+            "5111111111111111111111111111111111111111111111111111",
+            "511111111111111111111111111111111111111111111111111",
+            "-0.00001400000,0.00000,0.50000,1.32000,-0.00092",
+            "2024-01-02 03:04:05,123,456.7,-8",
+            "22 12 13 73 74 // -- ;; (()) [] {} 0 = : =>",
+            "____________________________________________",
+            "1234 5678 9012 3456 7890",
+            "-9.9800E-7,0.00000,0.50000,1.28000,-0.00108",
+            "1e10 2E-3 4111111111111111",
+            "EE382200221020145685",
+            "iban EE382200221020145685",
+            "5eEeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+            "ee ee ee ee 123-45-6789",
+        ];
+        for line in lines {
+            let fast = check_line(line, 7);
+            let full = check_line_all_checks(line, 7);
+            let summary = |v: &[ContentFinding]| {
+                format!(
+                    "{:?}",
+                    v.iter()
+                        .map(|f| (&f.secret_type, &f.redacted_preview))
+                        .collect::<Vec<_>>()
+                )
+            };
+            assert_eq!(summary(&fast), summary(&full), "line {line:?}");
+        }
+        assert_eq!(
+            check_line("4111 1111 1111 1111", 1)[0].secret_type,
+            ContentSecretType::CreditCard
+        );
+        assert_eq!(
+            check_line("123-45-6789", 1)[0].secret_type,
+            ContentSecretType::SsnPattern
+        );
+        assert_eq!(
+            check_line("EE382200221020145685", 1)[0].secret_type,
+            ContentSecretType::IbanPattern
+        );
+    }
 
     // ── Tier 1 tests ─────────────────────────────────────────────────────
 

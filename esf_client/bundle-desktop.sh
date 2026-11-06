@@ -61,6 +61,18 @@ if [[ "$NOTARIZE" == 1 ]]; then
     [[ -z "${HEDGEHOG_NOTARY_KEYCHAIN:-}" ]] || NOTARY_AUTH+=(--keychain "$HEDGEHOG_NOTARY_KEYCHAIN")
 fi
 
+# Stapling fetches the ticket from Apple; a dropped connection there is not a
+# rejection, so try a few times before giving up.
+staple() {
+    local attempt
+    for attempt in 1 2 3 4 5; do
+        xcrun stapler staple "$1" && return 0
+        echo "Stapling $1 failed (attempt $attempt); retrying in 20 s..." >&2
+        sleep 20
+    done
+    return 1
+}
+
 # ---------------------------------------------------------------- build ----
 if [[ "$SKIP_BUILD" == 0 ]]; then
     echo "Building universal Rust CLI..."
@@ -154,7 +166,7 @@ if [[ "$NOTARIZE" == 1 ]]; then
     if [[ "$(plutil -extract status raw -o - "$REPORT")" != "Accepted" ]]; then
         echo "Notarization was not accepted; the app cannot ship." >&2; cat "$REPORT" >&2; exit 1
     fi
-    xcrun stapler staple "$APP"
+    staple "$APP"
     xcrun stapler validate "$APP"
     spctl --assess --type execute --verbose=2 "$APP"
     zip_app
@@ -294,7 +306,7 @@ if [[ -n "$SIGN_IDENTITY" ]]; then
         if [[ "$(plutil -extract status raw -o - "$REPORT_DMG")" != "Accepted" ]]; then
             echo "Disk image notarization was not accepted; it cannot ship." >&2; cat "$REPORT_DMG" >&2; exit 1
         fi
-        xcrun stapler staple "$DMG_PATH"
+        staple "$DMG_PATH"
         spctl --assess --type open --context context:primary-signature --verbose=2 "$DMG_PATH"
     fi
 fi

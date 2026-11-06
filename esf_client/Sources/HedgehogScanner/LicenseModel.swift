@@ -14,7 +14,8 @@ struct LicenseStatus: Codable {
     let state: String?
     let tier: String?
     let email: String?
-    let expires_at: String?
+    // expires_at is left out on purpose: the CLI sends it as a Unix time
+    // (a number), and a String field here made every licence fail to decode.
     let message: String?
 }
 
@@ -216,13 +217,21 @@ struct LicenseBadge: View {
                 .controlSize(.small)
                 .disabled(model.isBusy)
                 .help("Sign in at gorse.is in your browser to turn on Pro for this computer.")
-                Button("Upgrade to Pro") { model.openPricing() }.controlSize(.small)
-                Button("Enter Key…") { showingKey = true }
-                    .buttonStyle(.link)
-                    .font(.caption)
-                    .help("Already have a licence key? Paste it here instead.")
+                // Buying and pasting a key are rarer than signing in, so they
+                // share one small menu; four buttons did not fit the toolbar.
+                Menu {
+                    Button("Buy Pro…") { model.openPricing() }
+                    Button("Enter Key…") { showingKey = true }
+                } label: {
+                    Image(systemName: "ellipsis.circle")
+                }
+                .menuStyle(.borderlessButton)
+                .menuIndicator(.hidden)
+                .fixedSize()
+                .help("Buy Pro, or paste a licence key you already have.")
             }
         }
+        .fixedSize()
         .sheet(isPresented: Binding(get: { model.isWaitingForBrowser }, set: { if !$0 { model.cancelBrowserActivation() } })) {
             VStack(alignment: .leading, spacing: 12) {
                 Text("Finish in your browser").font(.headline)

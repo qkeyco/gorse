@@ -14,6 +14,7 @@ struct ScannerView: View {
             ResultsPane(model: model)
                 .frame(minWidth: 460, maxWidth: .infinity)
         }
+        .task { await model.loadDefaultPlaces() }
         .onAppear {
             #if DEBUG
             let args = CommandLine.arguments
@@ -73,9 +74,31 @@ private struct FolderPane: View {
                 VStack(alignment: .leading, spacing: 10) {
                     Text("Where Gorse looks")
                         .font(.subheadline.weight(.semibold))
-                    Text("Desktop, Documents (including code checkouts such as GitHub), Downloads and Pictures, the text inside screenshots and photos, and Apple Notes.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                    if model.defaultPlaces.isEmpty {
+                        Text("Desktop, Documents (including code checkouts such as GitHub), Downloads and Pictures, the text inside screenshots and photos, and Apple Notes.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    } else {
+                        VStack(alignment: .leading, spacing: 7) {
+                            ForEach(model.defaultPlaces) { place in
+                                HStack(alignment: .top, spacing: 8) {
+                                    Image(systemName: place.symbol)
+                                        .foregroundStyle(.secondary)
+                                        .frame(width: 16)
+                                    VStack(alignment: .leading, spacing: 1) {
+                                        Text(place.label).font(.caption.weight(.semibold))
+                                        if let path = place.displayPath, place.kind != "settings" {
+                                            Text(path).font(.caption2).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
+                                        }
+                                        if !place.detail.isEmpty {
+                                            Text(place.detail).font(.caption2).foregroundStyle(.tertiary)
+                                        }
+                                    }
+                                }
+                                .opacity(model.wholeHome ? 0.4 : 1)
+                            }
+                        }
+                    }
                     Toggle(isOn: $model.wholeHome) {
                         VStack(alignment: .leading, spacing: 1) {
                             Text("Whole home folder (Pro)").font(.caption.weight(.semibold))
@@ -152,6 +175,20 @@ private struct FolderPane: View {
             Divider()
 
             VStack(alignment: .leading, spacing: 8) {
+                if model.isScanning {
+                    Button {
+                        model.stopScan()
+                    } label: {
+                        HStack {
+                            ProgressView().controlSize(.small)
+                            Text(model.isStopping ? "Stopping, keeping what was found…" : "Stop and Show Results")
+                        }
+                        .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.large)
+                    .disabled(model.isStopping)
+                } else {
                 Button {
                     Task { await model.runScan() }
                 } label: {
@@ -159,6 +196,8 @@ private struct FolderPane: View {
                         if model.isScanning {
                             ProgressView().controlSize(.small)
                             Text("Scanning…")
+                        } else if model.canResume {
+                            Label("Resume Scan", systemImage: "play.fill")
                         } else if model.folders.isEmpty && ScannerModel.canScanDefaults {
                             Label(model.wholeHome ? "Deep Scan, Whole Home" : (model.hasResults ? "Rescan" : "Deep Scan"), systemImage: "magnifyingglass")
                         } else if model.hasResults && !model.pendingFolders.isEmpty {
@@ -174,6 +213,7 @@ private struct FolderPane: View {
                 .buttonStyle(.borderedProminent)
                 .controlSize(.large)
                 .disabled((model.folders.isEmpty && !ScannerModel.canScanDefaults) || model.isScanning)
+                }
                 if model.hasResults && !model.pendingFolders.isEmpty {
                     Button("Rescan All") { Task { await model.runScan(rescanAll: true) } }
                         .controlSize(.small)
@@ -219,44 +259,46 @@ private struct ResultsPane: View {
             if let message = model.errorMessage {
                 Placeholder(systemImage: "exclamationmark.triangle", tint: .orange,
                             title: "The scan could not complete", detail: message)
+            } else if model.isScanning && !model.liveFindings.isEmpty {
+                // Findings appear as they are found; the scan carries on above.
+                VStack(spacing: 0) {
+                    HStack(alignment: .top, spacing: 8) {
+                        ProgressView().controlSize(.small)
+                        ScanProgressDetail(model: model, centered: false)
+                        Spacer(minLength: 0)
+                    }
+                    .padding(.horizontal, 12).padding(.vertical, 8)
+                    Divider()
+                    FindingsList(sections: model.liveFindings.sections(bySeverity: false), model: model)
+                }
             } else if model.isScanning {
                 VStack(spacing: 10) {
                     ProgressView()
-                    if let p = model.progress {
-                        if let phase = p.phase {
-                            Text(phase == "images" ? "Reading the text inside pictures…" : phase == "notes" ? "Reading Apple Notes…" : phase == "trufflehog" ? "Running TruffleHog's detectors…" : "Finishing…")
-                                .font(.caption).foregroundStyle(.secondary)
-                        } else {
-                            Text("\(p.filesScanned.formatted()) file\(p.filesScanned == 1 ? "" : "s") read · \(p.findings) finding\(p.findings == 1 ? "" : "s") so far")
-                                .font(.caption.weight(.semibold).monospacedDigit())
-                            Text(p.displayDir)
-                                .font(.system(.caption2, design: .monospaced))
-                                .foregroundStyle(.secondary)
-                                .lineLimit(1)
-                                .truncationMode(.middle)
-                                .frame(maxWidth: 480)
-                        }
-                    } else {
-                        Text("Starting…").font(.caption).foregroundStyle(.secondary)
-                    }
+                    ScanProgressDetail(model: model, centered: true)
+                        .frame(maxWidth: 480)
                 }
+                .padding(24)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else if let report = model.report {
-                switch (report.findings.isEmpty, report.coverageState) {
-                case (true, .allClear(let filesChecked)):
-                    Placeholder(systemImage: "checkmark.shield", tint: .green,
-                                title: "No secrets found",
-                                detail: (["\(filesChecked == 1 ? "1 readable file" : "\(filesChecked) readable files") in the chosen folders \(filesChecked == 1 ? "was" : "were") read, and nothing matched a known secret or sensitive-content pattern."] + report.coverageNotes).joined(separator: " "))
-                case (true, .gaps(let headline, let reasons)):
-                    GapsPlaceholder(headline: headline, reasons: reasons)
-                case (false, .gaps(let headline, let reasons)):
-                    VStack(spacing: 0) {
+                VStack(spacing: 0) {
+                    if report.notesUnreadable {
+                        NotesAccessBanner { model.openFullDiskAccessSettings() }
+                        Divider()
+                    }
+                    switch (report.findings.isEmpty, report.coverageState) {
+                    case (true, .allClear(let filesChecked)):
+                        Placeholder(systemImage: "checkmark.shield", tint: .green,
+                                    title: "No secrets found",
+                                    detail: (["\(filesChecked == 1 ? "1 readable file" : "\(filesChecked) readable files") in the chosen folders \(filesChecked == 1 ? "was" : "were") read, and nothing matched a known secret or sensitive-content pattern."] + report.coverageNotes).joined(separator: " "))
+                    case (true, .gaps(let headline, let reasons)):
+                        GapsPlaceholder(headline: headline, reasons: reasons)
+                    case (false, .gaps(let headline, let reasons)):
                         GapsBanner(headline: headline, reasons: reasons)
                         Divider()
-                        FindingsList(findings: report.findings, model: model)
+                        FindingsList(sections: report.findings.sections(bySeverity: true), model: model)
+                    case (false, .allClear):
+                        FindingsList(sections: report.findings.sections(bySeverity: true), model: model)
                     }
-                case (false, .allClear):
-                    FindingsList(findings: report.findings, model: model)
                 }
             } else {
                 Placeholder(systemImage: "doc.text.magnifyingglass", tint: .secondary,
@@ -269,9 +311,12 @@ private struct ResultsPane: View {
     }
 
     private var subtitle: String {
+        if model.isScanning {
+            return "Scanning… " + model.liveFindings.tally.summary(empty: "nothing found yet")
+        }
         guard let report = model.report else { return "Nothing scanned yet" }
         let seconds = max(report.elapsed_secs, 1)
-        var text = "\(report.total) finding\(report.total == 1 ? "" : "s") in \(seconds)s"
+        var text = "\(report.findings.tally.summary(empty: "Nothing found")) in \(seconds)s"
         if report.interrupted { text += " (stopped early)" }
         if let th = report.engines?.first(where: { $0.name == "trufflehog" }) {
             text += th.error == nil ? " · with TruffleHog \(th.version ?? "")" : " · TruffleHog failed"
@@ -328,8 +373,9 @@ struct GapsBanner: View {
                 Text(headline)
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                Spacer()
+                    .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
+                Spacer(minLength: 8)
                 Button(expanded ? "Hide" : "Why?") { expanded.toggle() }
                     .buttonStyle(.link)
                     .font(.caption)
@@ -399,35 +445,107 @@ private struct Placeholder: View {
     }
 }
 
+/// Credentials first, then sensitive content, each with its count.
 private struct FindingsList: View {
-    let findings: [ScanFinding]
+    let sections: [FindingSection]
     @ObservedObject var model: ScannerModel
-
-    private var grouped: [(String, [ScanFinding])] {
-        Dictionary(grouping: findings, by: \.category)
-            .sorted { lhs, rhs in
-                lhs.value.count != rhs.value.count ? lhs.value.count > rhs.value.count : lhs.key < rhs.key
-            }
-    }
 
     var body: some View {
         List {
-            ForEach(grouped, id: \.0) { category, items in
+            ForEach(sections) { section in
                 Section {
-                    ForEach(items) { finding in
+                    ForEach(section.findings) { finding in
                         FindingRow(finding: finding, model: model)
                     }
                 } header: {
-                    HStack {
-                        Text(category)
-                        Spacer()
-                        Text("\(items.count)")
+                    VStack(alignment: .leading, spacing: 1) {
+                        HStack {
+                            Text(section.group.title)
+                            Spacer()
+                            Text("\(section.findings.count)")
+                                .monospacedDigit()
+                                .foregroundStyle(.secondary)
+                        }
+                        Text(section.group.detail)
+                            .font(.caption2)
                             .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
                 }
             }
         }
         .listStyle(.inset)
+    }
+}
+
+/// Counts, bar, current step or folder, and disk share while a scan runs.
+/// One view for both the empty and the live-findings states, so the two
+/// never show different lines.
+private struct ScanProgressDetail: View {
+    @ObservedObject var model: ScannerModel
+    let centered: Bool
+
+    var body: some View {
+        VStack(alignment: centered ? .center : .leading, spacing: 3) {
+            if let p = model.progress {
+                Text(model.progressLine)
+                    .font(.caption.weight(.semibold).monospacedDigit())
+                    .multilineTextAlignment(centered ? .center : .leading)
+                    .fixedSize(horizontal: false, vertical: true)
+                if let f = model.fractionDone { ProgressView(value: f).frame(maxWidth: 360) }
+                if let step = ScannerModel.stepDescription(p.phase, imagesKnown: model.images != nil) {
+                    Text(step).font(.caption2).foregroundStyle(.secondary)
+                } else if p.phase == nil && !p.displayDir.isEmpty {
+                    Text("Reading \(p.displayDir)")
+                        .font(.system(.caption2, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+                if p.phase == nil, let percent = model.diskCoverage {
+                    HStack(spacing: 4) {
+                        Text("Covers about \(percent)% of what is on this disk.")
+                            .font(.caption2).foregroundStyle(.secondary)
+                        if ScannerModel.canScanDefaults && !model.wholeHome {
+                            Button("Whole-disk scan with Pro") { NSWorkspace.shared.open(URL(string: "https://www.gorse.is/pricing")!) }
+                                .buttonStyle(.link).font(.caption2)
+                        }
+                    }
+                }
+            } else {
+                Text("Starting…").font(.caption).foregroundStyle(.secondary)
+            }
+        }
+    }
+}
+
+/// Shown above the results when the scan could not open Apple Notes
+/// because Gorse has no Full Disk Access.
+struct NotesAccessBanner: View {
+    let openSettings: () -> Void
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: "note.text")
+                .foregroundStyle(.orange)
+                .font(.title3)
+            VStack(alignment: .leading, spacing: 3) {
+                Text("Apple Notes could not be read. Gorse needs Full Disk Access to check your notes.")
+                    .font(.subheadline.weight(.semibold))
+                    .fixedSize(horizontal: false, vertical: true)
+                Text("Turn on Gorse, then run the scan again.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer(minLength: 8)
+            Button("Open Privacy Settings", action: openSettings)
+                .controlSize(.small)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.orange.opacity(0.10))
+        .accessibilityIdentifier("notes-unreadable")
     }
 }
 
@@ -437,16 +555,21 @@ private struct FindingRow: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 3) {
+            // What it looks like and how sure, never the secret itself.
             HStack(spacing: 6) {
                 SeverityBadge(severity: finding.severity)
-                Text(shortPath)
-                    .font(.callout)
+                    .fixedSize()
+                Text("Looks like: \(finding.kind)")
+                    .font(.callout.weight(.semibold))
                     .lineLimit(1)
-                    .truncationMode(.middle)
-                if finding.line > 0 {
-                    Text("line \(finding.line)")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
+                if let likelihood = finding.likelihood {
+                    Text("\(likelihood)% sure")
+                        .font(.caption.weight(.semibold).monospacedDigit())
+                        .padding(.horizontal, 6).padding(.vertical, 1)
+                        .background(Color.secondary.opacity(0.15))
+                        .cornerRadius(4)
+                        .fixedSize()
+                        .help("How sure Gorse is that this match is real, from how exact the match is and where it sits (a comment or a test file counts against it). An estimate.")
                 }
                 Spacer()
                 Button {
@@ -455,32 +578,49 @@ private struct FindingRow: View {
                     Image(systemName: "arrow.right.circle")
                 }
                 .buttonStyle(.plain)
-                .help("Show in Finder")
+                .help(finding.isAppleNote ? "Open Notes" : "Show in Finder")
             }
-            Text(finding.description)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            Text(finding.preview)
-                .font(.system(.caption2, design: .monospaced))
-                .foregroundStyle(.tertiary)
-                .lineLimit(1)
+            if let reason = finding.reason {
+                Text(reason.prefix(1).uppercased() + reason.dropFirst())
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            HStack(spacing: 6) {
+                Image(systemName: finding.isAppleNote ? "note.text" : "doc")
+                    .font(.caption2).foregroundStyle(.tertiary)
+                Text(shortPath)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                if finding.line > 0 && !finding.isAppleNote {
+                    Text("line \(finding.line)")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                        .fixedSize()
+                }
+            }
         }
         .padding(.vertical, 3)
         .contextMenu {
-            Button("Show in Finder") { model.reveal(finding) }
+            Button(finding.isAppleNote ? "Open Notes" : "Show in Finder") { model.reveal(finding) }
             if let guide = finding.rotation_guide, let url = URL(string: guide) {
                 Button("How to rotate this key…") { NSWorkspace.shared.open(url) }
             }
-            Button("Copy Path") {
-                NSPasteboard.general.clearContents()
-                NSPasteboard.general.setString(finding.path, forType: .string)
+            if !finding.isAppleNote {
+                Button("Copy Path") {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(finding.path, forType: .string)
+                }
             }
         }
     }
 
     private var shortPath: String {
+        if finding.isAppleNote { return "Apple Notes" }
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
         guard let folder = model.folders.first(where: { finding.path.hasPrefix($0.url.path + "/") }) else {
-            return finding.path
+            return finding.path.hasPrefix(home + "/") ? "~" + finding.path.dropFirst(home.count) : finding.path
         }
         return folder.displayName + String(finding.path.dropFirst(folder.url.path.count))
     }

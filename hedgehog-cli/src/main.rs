@@ -127,6 +127,22 @@ enum Commands {
         /// Do not run TruffleHog's detectors even when it is installed
         #[arg(long)]
         no_trufflehog: bool,
+        /// Print, as JSON, the places a default deep scan reads, and exit
+        /// (the apps show this list before the first scan)
+        #[arg(long, hide = true)]
+        list_places: bool,
+        /// With --json: save progress to FILE so a stopped scan can carry on
+        /// from where it stopped; a finished scan removes the file
+        #[arg(long, value_name = "FILE", requires = "json", hide = true)]
+        resume: Option<std::path::PathBuf>,
+        /// Stop cleanly, reporting what was found, once FILE exists (how
+        /// the apps stop a scan on Windows, where there is no SIGINT)
+        #[arg(long, value_name = "FILE", hide = true)]
+        stop_file: Option<std::path::PathBuf>,
+        /// List every match instead of folding many of one kind in a file
+        /// into one entry (release checks need each match)
+        #[arg(long, hide = true)]
+        all_matches: bool,
     },
     /// Check a command against the agent guard rules (preview)
     #[command(hide = true)]
@@ -567,9 +583,26 @@ fn main() {
             include_skipped,
             progress,
             no_trufflehog,
+            list_places,
+            resume,
+            stop_file,
+            all_matches,
         } => {
-            if deep {
-                cmd_deep_scan(all_dirs, json, &paths, include_skipped, progress, no_trufflehog);
+            if list_places {
+                let places = content_scanner::default_scan_places();
+                println!("{}", serde_json::json!({ "places": places }));
+            } else if deep {
+                cmd_deep_scan(
+                    all_dirs,
+                    json,
+                    &paths,
+                    include_skipped,
+                    progress,
+                    no_trufflehog,
+                    resume.as_deref(),
+                    stop_file.as_deref(),
+                    all_matches,
+                );
             } else {
                 cmd_scan(all);
             }
@@ -1684,6 +1717,230 @@ fn print_coverage_summary(coverage: &content_scanner::ScanCoverage, no_findings:
 /// licence. Exact wording is user-facing and tested; no price in the binary.
 pub const FULL_SCAN_REQUIRES_PRO: &str = "The full scan of the whole home folder is part of Gorse Pro. Get a key at https://www.gorse.is/pricing then run `gorse activate <key>`. The default scan of Desktop, Documents, Downloads and Pictures is free and unchanged.";
 
+/// Number-shaped matches (card numbers, backup codes, identity numbers)
+/// inside drawings and package lock files are coordinates and hashes, not
+/// secrets; keys and passwords in those files are still reported.
+fn is_structural_number(r: &content_scanner::ScanResult) -> bool {
+    let category = content_scanner::finding_category(r);
+    if !matches!(category, "Financial" | "2FA Codes" | "Identity (SSN)") {
+        return false;
+    }
+    let name = r
+        .path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_ascii_lowercase())
+        .unwrap_or_default();
+    name.ends_with(".svg")
+        || name.ends_with(".lock")
+        || matches!(
+            name.as_str(),
+            "package-lock.json"
+                | "npm-shrinkwrap.json"
+                | "pnpm-lock.yaml"
+                | "go.sum"
+                | "composer.lock"
+        )
+}
+
+/// How many matches of one kind a single file may have before they are
+/// shown as one entry: a file with hundreds of "seed phrases" or "API keys"
+/// is a word list, a dataset or an analysis result, not a store of secrets.
+const REPEATS_SHOWN: usize = 5;
+
+/// Folds repeated matches of the same kind in the same file into the first
+/// one, with the count, a lower likelihood and a reason that says so.
+fn collapse_repeats(findings: Vec<serde_json::Value>) -> Vec<serde_json::Value> {
+    let key = |f: &serde_json::Value| format!("{}\u{0}{}", f["path"], f["description"]);
+    let mut counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for f in &findings {
+        *counts.entry(key(f)).or_default() += 1;
+    }
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for mut f in findings {
+        let k = key(&f);
+        let n = counts[&k];
+        if n <= REPEATS_SHOWN {
+            out.push(f);
+            continue;
+        }
+        if !seen.insert(k) {
+            continue;
+        }
+        let kind = f["description"]
+            .as_str()
+            .unwrap_or("")
+            .split(" — ")
+            .next()
+            .unwrap_or("")
+            .to_string();
+        let likelihood = f["likelihood"].as_u64().unwrap_or(50).min(35);
+        f["description"] = format!(
+            "{kind} — {n} similar matches in this file, so it is probably data or a word list rather than a secret"
+        )
+        .into();
+        f["likelihood"] = likelihood.into();
+        f["repeats"] = n.into();
+        out.push(f);
+    }
+    out
+}
+
+/// "credential" for something that unlocks an account or a wallet (keys,
+/// tokens, passwords, seed phrases, backup codes); "sensitive" for content
+/// that matters but unlocks nothing by itself (card and bank numbers,
+/// identity numbers, sensitivity labels, suspicious pictures). The apps
+/// count only credentials as "credentials found".
+fn finding_group(category: &str) -> &'static str {
+    match category {
+        "Financial" | "Identity (SSN)" | "Sensitivity Labels" | "Suspicious Images" => "sensitive",
+        _ => "credential",
+    }
+}
+
+/// How sure the scanner is that a match is a real secret, as a percentage
+/// for people to read. It comes from the match's confidence level (an exact
+/// format with a checksum down to a keyword guess), lowered when the line is
+/// a comment or the file looks like a test, sample or example. An estimate,
+/// not a measured rate.
+fn finding_likelihood(r: &content_scanner::ScanResult) -> u8 {
+    use hedgehog_taint::content_patterns::{Confidence, LineContext};
+    let mut percent: i32 = match r.finding.confidence {
+        Confidence::Definitive => 97,
+        Confidence::High => 90,
+        Confidence::ContextDependent => 75,
+        Confidence::Heuristic => 55,
+    };
+    if r.finding.context == LineContext::Comment {
+        percent -= 10;
+    }
+    let path = r.path.to_string_lossy().to_ascii_lowercase();
+    if [
+        "/test", "/tests/", "/fixture", "/example", "/sample", "/mock", ".example", "readme",
+    ]
+    .iter()
+    .any(|m| path.contains(m))
+    {
+        percent -= 20;
+    }
+    percent.clamp(20, 99) as u8
+}
+
+/// One deep-scan finding as the report and the live progress stream show
+/// it: where, what kind, and a redacted preview, never the secret itself.
+fn deep_finding_json(r: &content_scanner::ScanResult) -> serde_json::Value {
+    let likelihood = finding_likelihood(r);
+    let category = content_scanner::finding_category(r);
+    serde_json::json!({
+        "likelihood": likelihood,
+        "group": finding_group(category),
+        "path": r.path.display().to_string(),
+        "category": content_scanner::finding_category(r),
+        "severity": r.finding.secret_type.severity().label(),
+        "confidence": r.finding.confidence.label(),
+        "context": r.finding.context.label(),
+        "line": r.finding.line_number,
+        "preview": r.finding.redacted_preview,
+        "description": r.finding.description,
+    })
+}
+
+/// What a stopped `scan --deep --json --resume FILE` carries forward: the
+/// places it was scanning, folders and phases it finished, files read, and
+/// its findings (paths and redacted previews only, as in the report). The
+/// file is written owner-only and removed when a scan finishes.
+#[derive(serde::Serialize, serde::Deserialize, Default)]
+struct ResumeState {
+    roots: Vec<String>,
+    done_dirs: Vec<String>,
+    done_phases: Vec<String>,
+    /// Pictures already read for text, so a resume does not read them again.
+    #[serde(default)]
+    done_images: Vec<String>,
+    files_scanned: usize,
+    findings: Vec<serde_json::Value>,
+}
+
+impl ResumeState {
+    fn load(path: &std::path::Path) -> Option<Self> {
+        serde_json::from_slice(&std::fs::read(path).ok()?).ok()
+    }
+
+    /// Drops finished folders inside another finished folder: skipping the
+    /// outer one skips them anyway, and it keeps the saved file small.
+    fn pruned_dirs(&self) -> Vec<String> {
+        let all: std::collections::HashSet<&str> =
+            self.done_dirs.iter().map(String::as_str).collect();
+        let mut kept: Vec<String> = self
+            .done_dirs
+            .iter()
+            .filter(|dir| {
+                let mut path = std::path::Path::new(dir.as_str()).parent();
+                while let Some(parent) = path {
+                    if all.contains(parent.to_string_lossy().as_ref()) {
+                        return false;
+                    }
+                    path = parent.parent();
+                }
+                true
+            })
+            .cloned()
+            .collect();
+        kept.sort();
+        kept.dedup();
+        kept
+    }
+
+    fn save(&self, path: &std::path::Path) {
+        let compact = ResumeState {
+            roots: self.roots.clone(),
+            done_dirs: self.pruned_dirs(),
+            done_phases: self.done_phases.clone(),
+            done_images: self.done_images.clone(),
+            files_scanned: self.files_scanned,
+            findings: self.findings.clone(),
+        };
+        let Ok(body) = serde_json::to_vec(&compact) else {
+            return;
+        };
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let tmp = path.with_extension("tmp");
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        if let Ok(mut file) = options.open(&tmp) {
+            use std::io::Write;
+            if file.write_all(&body).is_ok() {
+                let _ = std::fs::rename(&tmp, path);
+            }
+        }
+    }
+}
+
+/// True when the Apple Notes container exists but cannot be listed. Without
+/// Full Disk Access macOS can hide the database itself, so "no NoteStore"
+/// would otherwise look like "no notes" rather than "not allowed to look".
+fn notes_folder_hidden() -> bool {
+    if !cfg!(target_os = "macos") {
+        return false;
+    }
+    let Some(home) = content_scanner::home_dir() else {
+        return false;
+    };
+    let folder = home.join("Library/Group Containers/group.com.apple.notes");
+    match std::fs::read_dir(&folder) {
+        Ok(_) => false,
+        Err(e) => e.kind() == std::io::ErrorKind::PermissionDenied,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn cmd_deep_scan(
     all_dirs: bool,
     json: bool,
@@ -1691,13 +1948,16 @@ fn cmd_deep_scan(
     include_skipped: bool,
     progress: bool,
     no_trufflehog: bool,
+    resume: Option<&std::path::Path>,
+    stop_file: Option<&std::path::Path>,
+    all_matches: bool,
 ) {
     use content_scanner::ScanEvent;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
     use std::time::Instant;
 
-    let config = content_scanner::ScanConfig {
+    let mut config = content_scanner::ScanConfig {
         include_skipped,
         ..Default::default()
     };
@@ -1757,12 +2017,45 @@ fn cmd_deep_scan(
         }
     }
 
+    // The stop file works everywhere, Windows included: when it appears the
+    // scan stops as if interrupted and still prints its report.
+    if let Some(path) = stop_file {
+        let _ = std::fs::remove_file(path);
+        let (path, flag) = (path.to_path_buf(), interrupt.clone());
+        std::thread::spawn(move || loop {
+            if path.exists() {
+                flag.store(true, Ordering::SeqCst);
+                let _ = std::fs::remove_file(&path);
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(300));
+        });
+    }
+
     let home = std::env::var("HOME").unwrap_or_default();
     let start = Instant::now();
 
     // JSON mode: collect results silently, no dashboard
     if json {
         let mut all_results: Vec<content_scanner::ScanResult> = Vec::new();
+        // A stopped scan of the same places carries on: its finished folders
+        // are skipped and its findings kept. Anything else starts afresh.
+        let roots: Vec<String> = dirs.iter().map(|d| d.display().to_string()).collect();
+        let mut saved = resume
+            .and_then(ResumeState::load)
+            .filter(|state| state.roots == roots)
+            .unwrap_or_else(|| ResumeState {
+                roots: roots.clone(),
+                ..Default::default()
+            });
+        let resumed = !saved.done_dirs.is_empty() || !saved.done_phases.is_empty();
+        config.done_dirs = Some(Arc::new(
+            saved
+                .done_dirs
+                .iter()
+                .map(std::path::PathBuf::from)
+                .collect(),
+        ));
         let mut coverage = content_scanner::ScanCoverage::new(&config);
 
         // Progress, when asked for, goes to stderr as one JSON object per
@@ -1780,13 +2073,138 @@ fn cmd_deep_scan(
                 "event": "start",
                 "roots": dirs.iter().map(|d| d.display().to_string()).collect::<Vec<_>>(),
             }));
+            // Count what will be read alongside the scan, so the apps can
+            // show "x of y files" and a bar. Best effort: a count that is
+            // still running when the scan ends is simply never shown.
+            let (count_dirs, count_stop) = (dirs.clone(), interrupt.clone());
+            let limits = (config.max_file_size, config.include_skipped);
+            std::thread::spawn(move || {
+                use std::io::Write;
+                let (mut files, mut bytes) = (0u64, 0u64);
+                for dir in &count_dirs {
+                    let (f, b) =
+                        content_scanner::estimate_scan(dir, limits.0, limits.1, &count_stop);
+                    files += f;
+                    bytes += b;
+                }
+                let line = serde_json::json!({"event": "estimate", "files_total": files, "bytes_total": bytes});
+                let _ = writeln!(std::io::stderr().lock(), "{line}");
+            });
         }
+        // Apple Notes and the text inside pictures first: they are where
+        // people paste things, and they are quick next to a big folder.
+        // notes_unreadable is set when Notes could not be read (usually no
+        // Full Disk Access); the Mac app then offers the privacy settings.
+        let mut notes_unreadable = false;
+        let send_finding = |r: &content_scanner::ScanResult, total: usize| {
+            if progress {
+                use std::io::Write;
+                let line = serde_json::json!({"event": "finding", "files_scanned": 0, "findings": total, "finding": deep_finding_json(r)});
+                let _ = writeln!(std::io::stderr().lock(), "{line}");
+            }
+        };
+        if !explicit
+            && !interrupt.load(Ordering::Relaxed)
+            && !saved.done_phases.iter().any(|p| p == "notes")
+        {
+            if progress {
+                emit(serde_json::json!({"event": "phase", "name": "notes"}));
+            }
+            let (apple_results, _, notes_err) = content_scanner::scan_apple_notes(&config);
+            notes_unreadable = notes_err.is_some() || notes_folder_hidden();
+            for r in apple_results {
+                send_finding(&r, saved.findings.len() + all_results.len() + 1);
+                all_results.push(r);
+            }
+            if !interrupt.load(Ordering::Relaxed) {
+                saved.done_phases.push("notes".into());
+            }
+        }
+
+        let mut ocr_error: Option<String> = None;
+        let mut ocr_attempted = false;
+        if !explicit
+            && !interrupt.load(Ordering::Relaxed)
+            && !saved.done_phases.iter().any(|p| p == "images")
+        {
+            if progress {
+                emit(serde_json::json!({"event": "phase", "name": "images"}));
+            }
+            let images = content_scanner::collect_image_paths(&dirs, &config, &interrupt);
+            coverage.image_ocr_cap_reached = images.cap_reached;
+            ocr_attempted = true;
+            let already: std::collections::HashSet<&str> =
+                saved.done_images.iter().map(String::as_str).collect();
+            let todo: Vec<std::path::PathBuf> = images
+                .paths
+                .iter()
+                .filter(|p| !already.contains(p.to_string_lossy().as_ref()))
+                .cloned()
+                .collect();
+            let total_images = images.paths.len();
+            let mut images_done = total_images - todo.len();
+            for batch in todo.chunks(content_scanner::OCR_BATCH_SIZE) {
+                if interrupt.load(Ordering::Relaxed) {
+                    break;
+                }
+                let (batch_results, batch_err) = content_scanner::ocr_scan_batch(batch);
+                if let Some(err) = batch_err {
+                    ocr_error = Some(err);
+                    break;
+                }
+                for r in batch_results {
+                    send_finding(&r, saved.findings.len() + all_results.len() + 1);
+                    all_results.push(r);
+                }
+                images_done += batch.len();
+                saved
+                    .done_images
+                    .extend(batch.iter().map(|p| p.display().to_string()));
+                if progress {
+                    emit(
+                        serde_json::json!({"event": "images", "done": images_done, "total": total_images}),
+                    );
+                }
+            }
+            if !interrupt.load(Ordering::Relaxed) && ocr_error.is_none() {
+                saved.done_phases.push("images".into());
+            }
+        }
+        apply_image_coverage(
+            &mut coverage,
+            ocr_attempted || saved.done_phases.iter().any(|p| p == "images"),
+            ocr_error.is_some(),
+        );
+
+        // A resumed scan counts on from where it stopped, and shows what it
+        // had already found straight away.
+        let earlier_files = saved.files_scanned;
+        let earlier_findings = saved.findings.len();
+        if progress && resumed {
+            emit(
+                serde_json::json!({"event": "resumed", "files_scanned": saved.files_scanned, "findings": saved.findings.len()}),
+            );
+            for f in &saved.findings {
+                emit(
+                    serde_json::json!({"event": "finding", "files_scanned": saved.files_scanned, "findings": saved.findings.len(), "finding": f}),
+                );
+            }
+        }
+        let mut newly_done: Vec<String> = Vec::new();
+        let mut live_per_file: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::new();
+        // The first finished folder is saved at once, then every 10 s.
+        let mut last_save = Instant::now() - std::time::Duration::from_secs(10);
         for dir in &dirs {
             if interrupt.load(Ordering::Relaxed) {
                 break;
             }
+            // Counts from each folder start at zero; add what came before.
+            let earlier_files = earlier_files + coverage.files_scanned;
+            let earlier_findings = earlier_findings + all_results.len();
+            let (mut last_files, mut live_found) = (0usize, Vec::<serde_json::Value>::new());
             let mut on_event = |event: ScanEvent<'_>| {
-                if !progress {
+                if !progress && !matches!(event, ScanEvent::DirDone { .. }) {
                     return;
                 }
                 let (files, findings, current) = match event {
@@ -1794,16 +2212,73 @@ fn cmd_deep_scan(
                         files_scanned,
                         findings_count,
                         dir,
-                    } => (
-                        files_scanned,
-                        findings_count,
-                        Some(dir.display().to_string()),
-                    ),
+                    } => {
+                        last_files = files_scanned;
+                        (
+                            files_scanned,
+                            findings_count,
+                            Some(dir.display().to_string()),
+                        )
+                    }
                     ScanEvent::Finding {
                         files_scanned,
                         findings_count,
-                        ..
-                    } => (files_scanned, findings_count, None),
+                        result,
+                    } => {
+                        // Every finding goes out at once (not throttled) so
+                        // the apps can list it while the scan carries on.
+                        let finding = deep_finding_json(result);
+                        last_files = files_scanned;
+                        // The live list shows a file's first few matches of a
+                        // kind; the report folds the rest into one entry.
+                        let shown = live_per_file
+                            .entry(format!(
+                                "{}\u{0}{}",
+                                finding["path"], finding["description"]
+                            ))
+                            .or_insert(0usize);
+                        *shown += 1;
+                        if is_structural_number(result) || *shown > REPEATS_SHOWN {
+                            if resume.is_some() && !is_structural_number(result) {
+                                live_found.push(finding);
+                            }
+                            return;
+                        }
+                        if resume.is_some() {
+                            live_found.push(finding.clone());
+                        }
+                        emit(serde_json::json!({
+                            "event": "finding",
+                            "files_scanned": files_scanned + earlier_files,
+                            "findings": findings_count + earlier_findings,
+                            "finding": finding,
+                        }));
+                        (files_scanned, findings_count, None)
+                    }
+                    ScanEvent::DirDone { dir } => {
+                        newly_done.push(dir.display().to_string());
+                        // Save progress now and then, so a quit, crash or
+                        // restart mid-scan still resumes from close by.
+                        if let Some(path) = resume {
+                            if last_save.elapsed() >= std::time::Duration::from_secs(10) {
+                                last_save = Instant::now();
+                                let mut findings = saved.findings.clone();
+                                findings.extend(all_results.iter().map(deep_finding_json));
+                                findings.extend(live_found.iter().cloned());
+                                let mut snapshot = ResumeState {
+                                    roots: saved.roots.clone(),
+                                    done_dirs: saved.done_dirs.clone(),
+                                    done_phases: saved.done_phases.clone(),
+                                    done_images: saved.done_images.clone(),
+                                    files_scanned: earlier_files + last_files,
+                                    findings,
+                                };
+                                snapshot.done_dirs.extend(newly_done.iter().cloned());
+                                snapshot.save(path);
+                            }
+                        }
+                        return;
+                    }
                 };
                 if last_emit.elapsed() < std::time::Duration::from_millis(100) && current.is_none()
                 {
@@ -1815,8 +2290,8 @@ fn cmd_deep_scan(
                 last_emit = Instant::now();
                 emit(serde_json::json!({
                     "event": "progress",
-                    "files_scanned": files,
-                    "findings": findings,
+                    "files_scanned": files + earlier_files,
+                    "findings": findings + earlier_findings,
                     "dir": current,
                 }));
             };
@@ -1824,52 +2299,29 @@ fn cmd_deep_scan(
                 dir,
                 &config,
                 &interrupt,
-                if progress { Some(&mut on_event) } else { None },
+                if progress || resume.is_some() {
+                    Some(&mut on_event)
+                } else {
+                    None
+                },
             );
             if progress {
                 emit(serde_json::json!({
                     "event": "progress",
-                    "files_scanned": outcome.coverage.files_scanned,
-                    "findings": outcome.results.len(),
+                    "files_scanned": outcome.coverage.files_scanned + earlier_files,
+                    "findings": outcome.results.len() + earlier_findings,
                     "dir": dir.display().to_string(),
                     "done": true,
                 }));
             }
-            all_results.extend(outcome.results);
+            all_results.extend(
+                outcome
+                    .results
+                    .into_iter()
+                    .filter(|r| !is_structural_number(r)),
+            );
             coverage.merge(outcome.coverage);
-        }
-        if progress && !explicit {
-            emit(serde_json::json!({"event": "phase", "name": "images"}));
-        }
-
-        // Scan images with OCR
-        let mut ocr_error: Option<String> = None;
-        let mut ocr_attempted = false;
-        if !explicit && !interrupt.load(Ordering::Relaxed) {
-            let images = content_scanner::collect_image_paths(&dirs, &config, &interrupt);
-            coverage.image_ocr_cap_reached = images.cap_reached;
-            ocr_attempted = true;
-            for batch in images.paths.chunks(content_scanner::OCR_BATCH_SIZE) {
-                if interrupt.load(Ordering::Relaxed) {
-                    break;
-                }
-                let (batch_results, batch_err) = content_scanner::ocr_scan_batch(batch);
-                if let Some(err) = batch_err {
-                    ocr_error = Some(err);
-                    break;
-                }
-                all_results.extend(batch_results);
-            }
-        }
-        apply_image_coverage(&mut coverage, ocr_attempted, ocr_error.is_some());
-
-        // Scan Apple Notes
-        if !explicit && !interrupt.load(Ordering::Relaxed) {
-            if progress {
-                emit(serde_json::json!({"event": "phase", "name": "notes"}));
-            }
-            let (apple_results, _, _) = content_scanner::scan_apple_notes(&config);
-            all_results.extend(apple_results);
+            saved.done_dirs.append(&mut newly_done);
         }
 
         // Second engine: TruffleHog's detectors, when installed, verification
@@ -1907,22 +2359,31 @@ fn cmd_deep_scan(
         }
 
         let elapsed = start.elapsed().as_secs();
-        let findings: Vec<serde_json::Value> = all_results
-            .iter()
-            .map(|r| {
-                serde_json::json!({
-                    "path": r.path.display().to_string(),
-                    "category": content_scanner::finding_category(r),
-                    "severity": r.finding.secret_type.severity().label(),
-                    "confidence": r.finding.confidence.label(),
-                    "context": r.finding.context.label(),
-                    "line": r.finding.line_number,
-                    "preview": r.finding.redacted_preview,
-                    "description": r.finding.description,
-                })
-            })
-            .collect();
-        let mut findings = findings;
+        let new_findings: Vec<serde_json::Value> =
+            all_results.iter().map(deep_finding_json).collect();
+        // A folder that was only part-read when the scan stopped is read
+        // again on resume, so drop findings already carried forward.
+        let mut findings = saved.findings.clone();
+        let key = |f: &serde_json::Value| {
+            (
+                f["path"].to_string(),
+                f["line"].to_string(),
+                f["category"].to_string(),
+                f["preview"].to_string(),
+            )
+        };
+        let mut seen: std::collections::HashSet<_> = findings.iter().map(key).collect();
+        findings.extend(new_findings.iter().filter(|f| seen.insert(key(f))).cloned());
+        coverage.files_scanned += saved.files_scanned;
+        if let Some(path) = resume {
+            if interrupt.load(Ordering::Relaxed) {
+                saved.findings = findings.clone();
+                saved.files_scanned = coverage.files_scanned;
+                saved.save(path);
+            } else {
+                let _ = std::fs::remove_file(path);
+            }
+        }
         for f in &external {
             findings.push(serde_json::json!({
                 "path": f.path,
@@ -1935,9 +2396,21 @@ fn cmd_deep_scan(
                 "description": if let Some(t) = &f.token_type { format!("{} recognised by TruffleHog's {} detector", t, f.detector) } else { format!("{} secret recognised by TruffleHog's detector{}", f.detector, if f.description.is_empty() { String::new() } else { format!(": {}", f.description) }) },
                 "rotation_guide": f.rotation_guide,
                 "engine": "trufflehog",
+                "likelihood": if f.verified { 99 } else { 85 },
+                "group": "credential",
             }));
         }
 
+        let mut coverage_json = serde_json::to_value(&coverage).unwrap_or_default();
+        if let Some(map) = coverage_json.as_object_mut() {
+            map.insert("notes_unreadable".into(), notes_unreadable.into());
+        }
+        // Saved progress keeps every match; only the report folds repeats.
+        let findings = if all_matches {
+            findings
+        } else {
+            collapse_repeats(findings)
+        };
         let output = serde_json::json!({
             "findings": findings,
             "total": findings.len(),
@@ -1945,8 +2418,9 @@ fn cmd_deep_scan(
             "files_scanned": coverage.files_scanned,
             "elapsed_secs": elapsed,
             "interrupted": interrupt.load(Ordering::Relaxed),
+            "resumed": resumed,
             "complete": coverage.complete,
-            "coverage": coverage,
+            "coverage": coverage_json,
         });
         println!("{}", serde_json::to_string(&output).unwrap());
         return;
@@ -1990,6 +2464,7 @@ fn cmd_deep_scan(
                     dashboard.elapsed_secs = start.elapsed().as_secs();
                     dashboard.redraw_if_needed();
                 }
+                ScanEvent::DirDone { .. } => {}
             }),
         );
         dashboard.all_results.extend(outcome.results);
@@ -3460,6 +3935,7 @@ fn cmd_audit(path: &str, json: bool) {
                     eprint!("\r  Scanning... {f} files, {n} findings");
                 }
             }
+            content_scanner::ScanEvent::DirDone { .. } => {}
         }),
     );
     let results = report.results;
@@ -5871,5 +6347,44 @@ fn cmd_engines(cmd: EnginesCommand) {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod finding_noise_tests {
+    use super::*;
+
+    fn finding(path: &str, description: &str) -> serde_json::Value {
+        serde_json::json!({"path": path, "description": description, "likelihood": 90, "category": "Seed Phrases"})
+    }
+
+    #[test]
+    fn many_matches_of_one_kind_in_a_file_fold_into_one() {
+        let mut list: Vec<_> = (0..40)
+            .map(|_| finding("/d/words.txt", "BIP-39 mnemonic seed phrase"))
+            .collect();
+        list.push(finding("/d/notes.txt", "BIP-39 mnemonic seed phrase"));
+        let out = collapse_repeats(list);
+        assert_eq!(out.len(), 2);
+        let folded = out.iter().find(|f| f["path"] == "/d/words.txt").unwrap();
+        assert_eq!(folded["repeats"], 40);
+        assert_eq!(folded["likelihood"], 35);
+        assert!(folded["description"]
+            .as_str()
+            .unwrap()
+            .starts_with("BIP-39 mnemonic seed phrase — 40 similar matches"));
+        let single = out.iter().find(|f| f["path"] == "/d/notes.txt").unwrap();
+        assert_eq!(
+            single["likelihood"], 90,
+            "a lone match keeps its likelihood"
+        );
+    }
+
+    #[test]
+    fn a_few_matches_are_left_alone() {
+        let list: Vec<_> = (0..REPEATS_SHOWN)
+            .map(|_| finding("/d/a.env", "Password"))
+            .collect();
+        assert_eq!(collapse_repeats(list).len(), REPEATS_SHOWN);
     }
 }

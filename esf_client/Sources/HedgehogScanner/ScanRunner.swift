@@ -79,6 +79,10 @@ struct ScanCoverage: Codable, Hashable {
     let images_seen: Int
     let images_content_not_checked: Int
     let image_ocr_cap_reached: Bool
+    /// True when the scan tried to read Apple Notes and macOS refused (the
+    /// app has no Full Disk Access). Absent from reports that did not try,
+    /// and from scanners that do not report it; both mean "no banner".
+    let notes_unreadable: Bool?
 }
 
 extension ScanCoverage {
@@ -110,7 +114,8 @@ extension ScanCoverage {
             limit_reached: limit_reached ?? o.limit_reached,
             images_seen: images_seen + o.images_seen,
             images_content_not_checked: images_content_not_checked + o.images_content_not_checked,
-            image_ocr_cap_reached: image_ocr_cap_reached || o.image_ocr_cap_reached
+            image_ocr_cap_reached: image_ocr_cap_reached || o.image_ocr_cap_reached,
+            notes_unreadable: notes_unreadable == true || o.notes_unreadable == true ? true : (notes_unreadable ?? o.notes_unreadable)
         )
     }
 }
@@ -130,12 +135,16 @@ extension ScanReport {
             return .gaps(headline: "\(Self.files(files_scanned)) checked. The scanner did not say what it skipped.",
                          reasons: ["This report came from an older scanner helper that does not describe its coverage. Reinstall Gorse Scanner to get a full report."])
         }
-        let gaps = coverage.has_gaps ?? !coverage.complete
+        let gaps = (coverage.has_gaps ?? !coverage.complete) || coverage.notes_unreadable == true
         if !gaps && !coverage.interrupted && !interrupted {
             return .allClear(filesChecked: coverage.files_scanned)
         }
         return .gaps(headline: Self.headline(for: coverage), reasons: Self.reasons(for: coverage, interrupted: interrupted))
     }
+
+    /// True when Apple Notes could not be read for lack of Full Disk Access:
+    /// the results then show a banner that opens the Privacy settings.
+    var notesUnreadable: Bool { coverage?.notes_unreadable == true }
 
     /// Plain-English notes about files the scanner never reads by design
     /// (PDFs, archives, pictures). Shown under a green result; not gaps.
@@ -168,6 +177,9 @@ extension ScanReport {
         }
         if coverage.dirs_skipped_by_rule > 0 || coverage.dirs_beyond_depth_limit > 0 {
             return "\(files(coverage.files_scanned)) checked, but some folders were skipped."
+        }
+        if coverage.notes_unreadable == true && !coverage.interrupted {
+            return "\(files(coverage.files_scanned)) checked, but Apple Notes could not be read."
         }
         return "\(files(coverage.files_scanned)) checked, but the scan did not finish."
     }
@@ -211,6 +223,9 @@ extension ScanReport {
         if c.files_skipped_other > 0 {
             reasons.append("\(items(c.files_skipped_other, "item was", "items were")) skipped because \(c.files_skipped_other == 1 ? "it is" : "they are") not an ordinary file.")
         }
+        if c.notes_unreadable == true {
+            reasons.append("Apple Notes could not be read because Gorse does not have Full Disk Access.")
+        }
         if let limit = c.limit_reached {
             reasons.append("The scan stopped early: \(limit).")
         }
@@ -234,13 +249,104 @@ struct ScanFinding: Codable, Identifiable, Hashable {
     let description: String
     let rotation_guide: String?
     let engine: String?
+    /// How sure the scanner is that this is a real secret, 0-100 (estimate).
+    let likelihood: Int?
+    /// "credential" or "sensitive" (card and bank numbers, identity numbers,
+    /// sensitivity labels, suspicious pictures). Absent in older reports,
+    /// which count every finding as a credential.
+    let group: String?
 
     var id: String { "\(path):\(line):\(category):\(preview)" }
+
+    /// "AWS Access Key" from "AWS Access Key — grants access to AWS services".
+    var kind: String {
+        description.components(separatedBy: " — ").first ?? category
+    }
+
+    /// Why it matters: the part of the description after the dash, if any.
+    var reason: String? {
+        let parts = description.components(separatedBy: " — ")
+        return parts.count > 1 ? parts.dropFirst().joined(separator: " — ") : nil
+    }
+
+    var isAppleNote: Bool { path.hasPrefix("AppleNotes:") }
+
+    var findingGroup: FindingGroup { group == "sensitive" ? .sensitive : .credential }
+
+    /// Critical first; anything unrecognised last.
+    var severityRank: Int {
+        switch severity.lowercased() {
+        case "critical": return 0
+        case "high": return 1
+        case "medium": return 2
+        case "low": return 3
+        default: return 4
+        }
+    }
+}
+
+/// The two kinds of finding the results list keeps apart.
+enum FindingGroup: String, CaseIterable, Identifiable {
+    case credential, sensitive
+    var id: String { rawValue }
+    var title: String { self == .credential ? "Credentials" : "Sensitive content" }
+    var detail: String {
+        self == .credential
+            ? "Keys, passwords, tokens and other ways into an account"
+            : "Card and bank numbers, identity numbers, sensitivity labels and suspicious pictures"
+    }
+}
+
+/// One section of the results list: its findings, in display order.
+struct FindingSection: Identifiable, Equatable {
+    let group: FindingGroup
+    let findings: [ScanFinding]
+    var id: String { group.rawValue }
+}
+
+/// How many credentials and sensitive items a list holds.
+struct FindingTally: Equatable {
+    var credentials = 0
+    var sensitive = 0
+    var total: Int { credentials + sensitive }
+
+    /// "38 credentials · 12 sensitive items"; a zero count is left out, and
+    /// an empty list reads `empty`.
+    func summary(empty: String = "No findings") -> String {
+        var parts: [String] = []
+        if credentials > 0 { parts.append(credentials == 1 ? "1 credential" : "\(credentials) credentials") }
+        if sensitive > 0 { parts.append(sensitive == 1 ? "1 sensitive item" : "\(sensitive) sensitive items") }
+        return parts.isEmpty ? empty : parts.joined(separator: " · ")
+    }
+}
+
+extension Array where Element == ScanFinding {
+    var tally: FindingTally {
+        var t = FindingTally()
+        for f in self {
+            if f.findingGroup == .sensitive { t.sensitive += 1 } else { t.credentials += 1 }
+        }
+        return t
+    }
+
+    /// Credentials first, then sensitive content; empty sections are left
+    /// out. With `bySeverity` each section runs critical to low, keeping the
+    /// incoming order among equals (the live list stays newest first).
+    func sections(bySeverity: Bool) -> [FindingSection] {
+        FindingGroup.allCases.compactMap { group in
+            var items = enumerated().filter { $0.element.findingGroup == group }
+            if bySeverity {
+                items.sort { ($0.element.severityRank, $0.offset) < ($1.element.severityRank, $1.offset) }
+            }
+            return items.isEmpty ? nil : FindingSection(group: group, findings: items.map(\.element))
+        }
+    }
 }
 
 enum ScanRunner {
-    /// Longest a single scan may run before it is stopped.
-    static let timeout: TimeInterval = 900
+    /// After this long a scan is asked to stop and report what it has found
+    /// (as an incomplete scan); results are never thrown away for time.
+    static let timeout: TimeInterval = 4 * 60 * 60
     /// Largest JSON report accepted from the child.
     static let outputLimit = 16 * 1024 * 1024
 
@@ -259,13 +365,14 @@ enum ScanRunner {
     /// CLI uses its own defaults (Desktop, Documents, Downloads, Pictures,
     /// text inside images, Apple Notes), or the whole home folder when
     /// `wholeHome` is set; only the unsandboxed build may ask for that.
-    static func scan(folders: [URL], wholeHome: Bool = false, onProgress: ((ScanProgress) -> Void)? = nil) async throws -> ScanReport {
+    static func scan(folders: [URL], wholeHome: Bool = false, stopper: ChildHandle? = nil, resumeFile: URL? = nil, onProgress: ((ScanProgress) -> Void)? = nil) async throws -> ScanReport {
         let helper = try helperURL()
         var arguments = ["scan", "--deep", "--json"]
+        if let resumeFile { arguments += ["--resume", resumeFile.path] }
         for folder in folders { arguments += ["--path", folder.path] }
         if folders.isEmpty && wholeHome { arguments.append("--all-dirs") }
         if onProgress != nil { arguments.append("--progress") }
-        let (stdout, stderr, status) = try await execute(helper, arguments: arguments, timeout: timeout, input: nil, onStderrLine: onProgress.map { handler in
+        let (stdout, stderr, status) = try await execute(helper, arguments: arguments, timeout: timeout, input: nil, handle: stopper, graceful: true, onStderrLine: onProgress.map { handler in
             { line in if let progress = ScanProgress.parse(line) { handler(progress) } }
         })
         switch status {
@@ -283,7 +390,7 @@ enum ScanRunner {
 
     /// Lets a cancelled Swift task stop the child it is waiting on, so a
     /// long wait (the browser sign-in) ends when the person clicks Cancel.
-    private final class ChildHandle: @unchecked Sendable {
+    final class ChildHandle: @unchecked Sendable {
         private let lock = NSLock()
         private var process: Process?
         private var cancelled = false
@@ -297,14 +404,20 @@ enum ScanRunner {
             cancelled = true
             if let process, process.isRunning { process.terminate() }
         }
+        /// SIGINT: the CLI finishes the file it is on and prints its report,
+        /// marked interrupted, instead of dying with nothing.
+        func interrupt() {
+            lock.lock(); defer { lock.unlock() }
+            if let process, process.isRunning { process.interrupt() }
+        }
     }
 
-    static func execute(_ executable: URL, arguments: [String], timeout: TimeInterval, input: Data? = nil, onStderrLine: ((String) -> Void)? = nil) async throws -> (Data, Data, Status) {
-        let handle = ChildHandle()
+    static func execute(_ executable: URL, arguments: [String], timeout: TimeInterval, input: Data? = nil, handle given: ChildHandle? = nil, graceful: Bool = false, onStderrLine: ((String) -> Void)? = nil) async throws -> (Data, Data, Status) {
+        let handle = given ?? ChildHandle()
         return try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
                 DispatchQueue.global(qos: .userInitiated).async {
-                    do { continuation.resume(returning: try executeBlocking(executable, arguments: arguments, timeout: timeout, input: input, onStderrLine: onStderrLine, handle: handle)) }
+                    do { continuation.resume(returning: try executeBlocking(executable, arguments: arguments, timeout: timeout, input: input, onStderrLine: onStderrLine, handle: handle, graceful: graceful)) }
                     catch { continuation.resume(throwing: error) }
                 }
             }
@@ -313,7 +426,7 @@ enum ScanRunner {
         }
     }
 
-    private static func executeBlocking(_ executable: URL, arguments: [String], timeout: TimeInterval, input: Data? = nil, onStderrLine: ((String) -> Void)? = nil, handle: ChildHandle? = nil) throws -> (Data, Data, Status) {
+    private static func executeBlocking(_ executable: URL, arguments: [String], timeout: TimeInterval, input: Data? = nil, onStderrLine: ((String) -> Void)? = nil, handle: ChildHandle? = nil, graceful: Bool = false) throws -> (Data, Data, Status) {
         let process = Process()
         process.executableURL = executable
         process.arguments = arguments
@@ -373,9 +486,18 @@ enum ScanRunner {
         let finished = DispatchSemaphore(value: 0)
         process.terminationHandler = { _ in finished.signal() }
         if finished.wait(timeout: deadline) == .timedOut {
-            timedOut = true
-            process.terminate()
-            if finished.wait(timeout: .now() + 5) == .timedOut { kill(process.processIdentifier, SIGKILL); finished.wait() }
+            // A graceful child is asked to stop and report first; only if it
+            // does not within two minutes is it ended and the run lost.
+            if graceful {
+                process.interrupt()
+                if finished.wait(timeout: .now() + 120) == .timedOut { timedOut = true }
+            } else {
+                timedOut = true
+            }
+            if timedOut {
+                process.terminate()
+                if finished.wait(timeout: .now() + 5) == .timedOut { kill(process.processIdentifier, SIGKILL); finished.wait() }
+            }
         }
         group.wait()
         try? stdout.fileHandleForReading.close()
@@ -392,6 +514,14 @@ struct ScanProgress: Equatable {
     var findings: Int
     var currentDir: String?
     var phase: String?
+    /// Set on a "finding" event: one finding, as soon as the CLI finds it.
+    var finding: ScanFinding? = nil
+    /// Set on the "estimate" event: how many files, and bytes, the scan will read.
+    var filesTotal: Int? = nil
+    var bytesTotal: Int64? = nil
+    /// Set on "images" events: pictures read for text so far, of how many.
+    var imagesDone: Int? = nil
+    var imagesTotal: Int? = nil
 
     static func parse(_ line: String) -> ScanProgress? {
         guard let data = line.data(using: .utf8),
@@ -404,6 +534,20 @@ struct ScanProgress: Equatable {
                                 currentDir: json["dir"] as? String, phase: nil)
         case "phase":
             return ScanProgress(filesScanned: -1, findings: -1, currentDir: nil, phase: json["name"] as? String)
+        case "images":
+            return ScanProgress(filesScanned: -1, findings: -1, currentDir: nil, phase: "images",
+                                imagesDone: json["done"] as? Int, imagesTotal: json["total"] as? Int)
+        case "estimate":
+            return ScanProgress(filesScanned: -1, findings: -1, currentDir: nil, phase: nil,
+                                filesTotal: json["files_total"] as? Int,
+                                bytesTotal: (json["bytes_total"] as? NSNumber)?.int64Value)
+        case "finding":
+            guard let raw = json["finding"],
+                  let body = try? JSONSerialization.data(withJSONObject: raw),
+                  let finding = try? JSONDecoder().decode(ScanFinding.self, from: body) else { return nil }
+            return ScanProgress(filesScanned: json["files_scanned"] as? Int ?? 0,
+                                findings: json["findings"] as? Int ?? 0,
+                                currentDir: nil, phase: nil, finding: finding)
         default:
             return nil
         }

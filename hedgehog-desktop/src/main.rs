@@ -8,6 +8,12 @@
 //! credential file itself and never prints a secret.
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
+mod deep;
+mod schedule;
+#[cfg(debug_assertions)]
+mod shots;
+mod text;
+
 use eframe::egui::{self, Color32, RichText};
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
@@ -16,6 +22,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, Receiver};
 use std::sync::Arc;
 use std::time::Duration;
+use text::home_abbrev;
 
 // ---------------------------------------------------------------- report ----
 
@@ -56,6 +63,16 @@ impl Report {
         self.changes
             .unassessed_count
             .max(self.changes.unassessed.len() as u64)
+    }
+
+    /// Findings with any path to a production target. Counted here rather
+    /// than read from `critical_indirect_paths`, which counts only indirect
+    /// signing and financial paths.
+    fn findings_reaching_production(&self) -> u64 {
+        self.findings
+            .iter()
+            .filter(|f| f.paths.iter().any(|p| p.target_production == Some(true)))
+            .count() as u64
     }
 
     /// Incomplete by the CLI's flag, a coverage failure, or earlier
@@ -207,6 +224,16 @@ impl VerificationCounts {
         c
     }
 
+    /// Anything a provider check produced at all (not counting not_attempted).
+    fn attempted(&self) -> u64 {
+        self.identity_confirmed
+            + self.permission_confirmed
+            + self.local_config
+            + self.confirmed
+            + self.failed
+            + self.unsupported
+    }
+
     fn summary(&self) -> String {
         let levels = self.identity_confirmed + self.permission_confirmed + self.local_config;
         if self.confirmed > 0 && levels == 0 {
@@ -239,6 +266,31 @@ fn verification_label(status: &str) -> &'static str {
         "unsupported" => "not supported yet",
         _ => "not checked with the provider",
     }
+}
+
+/// "check failed: aws sts get-caller-identity timed out", or None when
+/// there is nothing to say.
+fn verification_line(v: &FindingVerification) -> Option<String> {
+    let status = v.status.to_ascii_lowercase();
+    let detail = v.detail.trim();
+    if status.is_empty() || (status == "not_attempted" && detail.is_empty()) {
+        return None;
+    }
+    let headline = match status.as_str() {
+        "identity_confirmed"
+        | "permission_confirmed"
+        | "local_config"
+        | "confirmed"
+        | "failed"
+        | "unsupported"
+        | "not_attempted" => verification_label(&status).to_string(),
+        other => format!("provider check {other}"),
+    };
+    Some(if detail.is_empty() {
+        headline
+    } else {
+        format!("{headline}: {detail}")
+    })
 }
 
 #[derive(Deserialize, Clone, Default)]
@@ -303,65 +355,6 @@ struct ReachPath {
     hops: Option<u32>,
 }
 
-// The file scan (`gorse-cli scan --deep --json`): secrets by content in
-// Desktop, Documents, Downloads and Pictures, or the whole home folder.
-#[derive(Deserialize, Clone, Default)]
-struct ScanReport {
-    #[serde(default)]
-    engines: Vec<ScanEngine>,
-    #[serde(default)]
-    findings: Vec<ScanFinding>,
-    #[serde(default)]
-    total: u64,
-    #[serde(default)]
-    files_scanned: u64,
-    #[serde(default)]
-    elapsed_secs: u64,
-    #[serde(default)]
-    interrupted: bool,
-    coverage: Option<ScanCoverage>,
-}
-
-#[derive(Deserialize, Clone, Default)]
-struct ScanCoverage {
-    #[serde(default)]
-    complete: bool,
-    has_gaps: Option<bool>,
-    #[serde(default)]
-    permission_denied: u64,
-    #[serde(default)]
-    files_over_size_limit: u64,
-    #[serde(default)]
-    files_skipped_by_type: u64,
-    #[serde(default)]
-    dirs_skipped_by_rule: u64,
-    limit_reached: Option<String>,
-}
-
-#[derive(Deserialize, Clone, Default)]
-#[allow(dead_code)]
-struct ScanEngine {
-    #[serde(default)]
-    name: String,
-    version: Option<String>,
-    findings: Option<u64>,
-    error: Option<String>,
-}
-
-#[derive(Deserialize, Clone)]
-struct ScanFinding {
-    rotation_guide: Option<String>,
-    path: String,
-    category: String,
-    severity: String,
-    #[serde(default)]
-    line: u64,
-    #[serde(default)]
-    preview: String,
-    #[serde(default)]
-    description: String,
-}
-
 // Which plan this computer is on, from the CLI's licence state.
 #[derive(Deserialize, Clone, Default)]
 struct LicenseStatus {
@@ -398,6 +391,12 @@ const PRICING_URL: &str = "https://www.gorse.is/pricing";
 const DASHBOARD_URL: &str = "https://www.gorse.is/dashboard";
 
 fn run_cli(args: &[&str], input: Option<&str>) -> Result<Vec<u8>, String> {
+    run_cli_full(args, input).map(|(_, out, _)| out)
+}
+
+/// Runs the checker and returns its exit code (2 when it had none),
+/// stdout and stderr.
+fn run_cli_full(args: &[&str], input: Option<&str>) -> Result<(i32, Vec<u8>, Vec<u8>), String> {
     use std::io::Write;
     let cli = cli_path().ok_or_else(|| {
         "The checker is missing. Keep gorse-cli.exe in the same folder as this program.".to_string()
@@ -427,7 +426,11 @@ fn run_cli(args: &[&str], input: Option<&str>) -> Result<Vec<u8>, String> {
     let output = child
         .wait_with_output()
         .map_err(|e| format!("The checker did not finish: {e}"))?;
-    Ok(output.stdout)
+    Ok((
+        output.status.code().unwrap_or(2),
+        output.stdout,
+        output.stderr,
+    ))
 }
 
 fn license_status() -> License {
@@ -566,7 +569,7 @@ fn safe_url(url: &str) -> bool {
     url.starts_with("https://")
         && url
             .chars()
-            .all(|c| c.is_ascii_alphanumeric() || ":/.?=-_%".contains(c))
+            .all(|c| c.is_ascii_alphanumeric() || ":/.?=-_%#~+".contains(c))
 }
 
 /// Like `run_cli` with stdin, but gives up after `limit` and stops as soon
@@ -825,8 +828,9 @@ fn cli_path() -> Option<PathBuf> {
         .find(|c| c.is_file() && c.canonicalize().map(|real| real != me).unwrap_or(false))
 }
 
-/// Where the HTML report of the latest run lives until the user saves it.
-fn report_path() -> PathBuf {
+/// This program's own folder: %LOCALAPPDATA%\Gorse on Windows,
+/// $XDG_DATA_HOME/Gorse (or ~/.local/share/Gorse) on Linux.
+fn app_dir() -> PathBuf {
     let base = if cfg!(windows) {
         std::env::var_os("LOCALAPPDATA").map(PathBuf::from)
     } else if cfg!(target_os = "macos") {
@@ -841,7 +845,21 @@ fn report_path() -> PathBuf {
     };
     let dir = base.unwrap_or_else(std::env::temp_dir).join("Gorse");
     let _ = std::fs::create_dir_all(&dir);
-    dir.join("exposure.html")
+    dir
+}
+
+/// Where the HTML report of the latest run lives until the user saves it.
+fn report_path() -> PathBuf {
+    app_dir().join("exposure.html")
+}
+
+fn verify_explained_path() -> PathBuf {
+    app_dir().join("verify-explained")
+}
+
+/// The person has read what Verify does once; after that it runs at once.
+fn verify_explained() -> bool {
+    verify_explained_path().is_file()
 }
 
 enum Outcome {
@@ -857,7 +875,7 @@ enum Outcome {
 
 /// What Verify does, shown before it runs. The provider tools are the
 /// person's own; nothing is sent to Gorse.
-const VERIFY_EXPLANATION: &str = "Verify asks your own installed provider tools read-only questions (aws, gh, kubectl, vault, gcloud, az, doctl); nothing is sent to Gorse.";
+const VERIFY_EXPLANATION: &str = "Verify asks your own installed provider tools read-only questions (aws, gh, kubectl, vault, gcloud, az, doctl, eth_getCode) and nothing is sent to Gorse. Each finding says what the provider confirmed: the identity, or a specific permission. A check that only reads local configuration confirms nothing, and the rest stay inferred.";
 
 /// Runs the check on a worker thread. Exit 1 means findings at or above
 /// "high" and exit 3 an incomplete check; both are results. Only exit 2 or
@@ -948,124 +966,6 @@ fn confidence_color(label: &str) -> Color32 {
     }
 }
 
-#[derive(Clone, Default)]
-struct ScanProgress {
-    files: u64,
-    findings: u64,
-    dir: Option<String>,
-    phase: Option<String>,
-}
-
-type SharedProgress = std::sync::Arc<std::sync::Mutex<ScanProgress>>;
-
-enum ScanOutcome {
-    Done(ScanReport),
-    Failed(String),
-}
-
-/// Runs the file scan on a worker thread, with `--progress` lines from the
-/// checker's stderr folded into `progress` as they arrive. Exit codes other
-/// than 0 are errors.
-fn run_scan(whole_home: bool, progress: SharedProgress) -> Receiver<ScanOutcome> {
-    let (tx, rx) = channel();
-    std::thread::spawn(move || {
-        let outcome = (|| {
-            use std::io::{BufRead, Read};
-            let cli = cli_path().ok_or_else(|| {
-                "The checker is missing. Keep gorse-cli.exe in the same folder as this program."
-                    .to_string()
-            })?;
-            let mut cmd = Command::new(&cli);
-            cmd.args(["scan", "--deep", "--json", "--progress"]);
-            if whole_home {
-                cmd.arg("--all-dirs");
-            }
-            cmd.stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::piped());
-            #[cfg(windows)]
-            {
-                use std::os::windows::process::CommandExt;
-                cmd.creation_flags(0x0800_0000);
-            }
-            let mut child = cmd
-                .spawn()
-                .map_err(|e| format!("Could not start the scanner: {e}"))?;
-            let stderr = child.stderr.take().ok_or("no stderr")?;
-            let mut stdout = child.stdout.take().ok_or("no stdout")?;
-            let progress_for_reader = progress.clone();
-            let reader = std::thread::spawn(move || {
-                let mut other = String::new();
-                for line in std::io::BufReader::new(stderr)
-                    .lines()
-                    .map_while(Result::ok)
-                {
-                    if line.starts_with('{') {
-                        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) {
-                            let mut p = progress_for_reader.lock().unwrap();
-                            match v.get("event").and_then(|e| e.as_str()) {
-                                Some("progress") => {
-                                    p.files = v
-                                        .get("files_scanned")
-                                        .and_then(|x| x.as_u64())
-                                        .unwrap_or(p.files);
-                                    p.findings = v
-                                        .get("findings")
-                                        .and_then(|x| x.as_u64())
-                                        .unwrap_or(p.findings);
-                                    if let Some(d) = v.get("dir").and_then(|x| x.as_str()) {
-                                        p.dir = Some(d.to_string());
-                                    }
-                                    p.phase = None;
-                                }
-                                Some("phase") => {
-                                    p.phase = v
-                                        .get("name")
-                                        .and_then(|x| x.as_str())
-                                        .map(|s| s.to_string());
-                                }
-                                _ => {}
-                            }
-                        }
-                    } else if other.len() < 4000 {
-                        other.push_str(&line);
-                        other.push('\n');
-                    }
-                }
-                other
-            });
-            let mut out = Vec::new();
-            stdout.read_to_end(&mut out).map_err(|e| e.to_string())?;
-            let status = child
-                .wait()
-                .map_err(|e| format!("The scanner did not finish: {e}"))?;
-            let other = reader.join().unwrap_or_default();
-            if !status.success() {
-                let tail = other.trim();
-                return Err(if tail.is_empty() {
-                    "The scan could not complete.".into()
-                } else {
-                    tail.chars()
-                        .rev()
-                        .take(2000)
-                        .collect::<Vec<_>>()
-                        .into_iter()
-                        .rev()
-                        .collect()
-                });
-            }
-            serde_json::from_slice::<ScanReport>(&out).map_err(|_| {
-                "The scanner returned a report this program could not read.".to_string()
-            })
-        })();
-        let _ = tx.send(match outcome {
-            Ok(r) => ScanOutcome::Done(r),
-            Err(e) => ScanOutcome::Failed(e),
-        });
-    });
-    rx
-}
-
 fn open_path(path: &Path) {
     #[cfg(windows)]
     let _ = Command::new("cmd")
@@ -1088,18 +988,6 @@ fn reveal_path(path: &Path) {
     #[cfg(all(unix, not(target_os = "macos")))]
     if let Some(dir) = path.parent() {
         let _ = Command::new("xdg-open").arg(dir).spawn();
-    }
-}
-
-fn home_abbrev(location: &str) -> String {
-    let home = std::env::var_os("USERPROFILE")
-        .or_else(|| std::env::var_os("HOME"))
-        .map(|h| h.to_string_lossy().into_owned());
-    match home {
-        Some(h) if !h.is_empty() && location.starts_with(&h) => {
-            format!("~{}", &location[h.len()..])
-        }
-        _ => location.to_string(),
     }
 }
 
@@ -1145,7 +1033,6 @@ struct App {
     install_rx: Option<Receiver<Result<(), String>>>,
     install_progress: SharedDownload,
     install_error: Option<String>,
-    scan_progress: SharedProgress,
     update_rx: Option<Receiver<Option<UpdateNotice>>>,
     newer: Option<UpdateNotice>,
     update_dismissed: bool,
@@ -1156,10 +1043,8 @@ struct App {
     key_error: Option<String>,
     browser: Option<BrowserFlow>,
     mode: Mode,
-    scan_running: Option<Receiver<ScanOutcome>>,
-    scan: Option<ScanReport>,
-    scan_error: Option<String>,
-    whole_home: bool,
+    deep: deep::DeepState,
+    schedule: schedule::ScheduleState,
     running: Option<Receiver<Outcome>>,
     report: Option<Report>,
     html: Option<PathBuf>,
@@ -1170,6 +1055,12 @@ struct App {
     verify_armed: bool,
     /// The checker's refusal of the last Verify (Free plan).
     verify_refused: Option<String>,
+    /// The run in progress asks the providers.
+    verifying: bool,
+    /// When the last check finished (seconds since 1970).
+    last_check: Option<i64>,
+    #[cfg(debug_assertions)]
+    shots: Option<shots::Shots>,
 }
 
 impl App {
@@ -1183,7 +1074,6 @@ impl App {
             install_rx: None,
             install_progress: SharedDownload::default(),
             install_error: None,
-            scan_progress: SharedProgress::default(),
             update_rx: None,
             newer: None,
             update_dismissed: false,
@@ -1194,10 +1084,8 @@ impl App {
             key_error: None,
             browser: None,
             mode: Mode::Reach,
-            scan_running: None,
-            scan: None,
-            scan_error: None,
-            whole_home: false,
+            deep: deep::DeepState::new(),
+            schedule: schedule::ScheduleState::new(),
             running: None,
             report: None,
             html: None,
@@ -1206,6 +1094,10 @@ impl App {
             started_at: None,
             verify_armed: false,
             verify_refused: None,
+            verifying: false,
+            last_check: None,
+            #[cfg(debug_assertions)]
+            shots: shots::Shots::from_env(),
         };
         app.start();
         app
@@ -1214,6 +1106,31 @@ impl App {
     fn refresh_engines(&mut self) {
         let (tx, rx) = channel();
         std::thread::spawn(move || {
+            let _ = tx.send(engine_status());
+        });
+        self.engine_rx = Some(rx);
+    }
+
+    /// One-click TruffleHog: the CLI downloads, checks and installs it.
+    fn start_trufflehog_install(&mut self) {
+        if self.install_rx.is_some() {
+            return;
+        }
+        self.install_error = None;
+        *self.install_progress.lock().unwrap() = DownloadProgress::default();
+        let progress = self.install_progress.clone();
+        let (tx, rx) = channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(install_trufflehog(progress));
+        });
+        self.install_rx = Some(rx);
+    }
+
+    /// Removes the copy of TruffleHog Gorse installed, then re-reads the status.
+    fn remove_trufflehog(&mut self) {
+        let (tx, rx) = channel();
+        std::thread::spawn(move || {
+            let _ = run_cli(&["engines", "remove", "trufflehog", "--json"], None);
             let _ = tx.send(engine_status());
         });
         self.engine_rx = Some(rx);
@@ -1248,16 +1165,32 @@ impl App {
         self.error = None;
         self.verify_refused = None;
         self.verify_armed = false;
+        self.verifying = false;
         self.started_at = Some(std::time::Instant::now());
         self.running = Some(run_check(false));
+    }
+
+    /// "Verify with providers": explained once, then it runs straight away.
+    fn verify_tapped(&mut self) {
+        if self.running.is_some() {
+            return;
+        }
+        if verify_explained() {
+            self.start_verify();
+        } else {
+            self.verify_armed = true;
+            self.verify_refused = None;
+        }
     }
 
     /// The Verify run: the same check, with the providers asked. The
     /// checker gates it on the licence itself.
     fn start_verify(&mut self) {
+        let _ = std::fs::write(verify_explained_path(), b"1");
         self.error = None;
         self.verify_refused = None;
         self.verify_armed = false;
+        self.verifying = true;
         self.started_at = Some(std::time::Instant::now());
         self.running = Some(run_check(true));
     }
@@ -1369,30 +1302,22 @@ impl App {
             }
             self.license = license;
         }
-        if let Some(rx) = &self.scan_running {
-            match rx.try_recv() {
-                Ok(ScanOutcome::Done(report)) => {
-                    self.scan = Some(report);
-                    self.scan_running = None;
-                }
-                Ok(ScanOutcome::Failed(message)) => {
-                    self.scan = None;
-                    self.scan_error = Some(message);
-                    self.scan_running = None;
-                }
-                Err(_) => ctx.request_repaint_after(Duration::from_millis(250)),
-            }
-        }
+        self.deep.poll(ctx);
+        self.schedule.poll(ctx);
         if let Some(rx) = &self.running {
             match rx.try_recv() {
                 Ok(Outcome::Done { report, html }) => {
                     self.html = html.is_file().then_some(html);
                     self.report = Some(*report);
                     self.running = None;
+                    self.last_check = Some(text::now_unix());
+                    // Every run is recorded: "Last check" and the history follow.
+                    self.schedule.refresh();
                 }
                 Ok(Outcome::Refused(message)) => {
                     // The previous report stays; only the refusal is shown.
                     self.verify_refused = Some(message);
+                    self.verifying = false;
                     self.running = None;
                 }
                 Ok(Outcome::Failed(message)) => {
@@ -1400,6 +1325,7 @@ impl App {
                     self.html = None;
                     self.error = Some(message);
                     self.running = None;
+                    self.schedule.refresh();
                 }
                 Err(_) => ctx.request_repaint_after(Duration::from_millis(250)),
             }
@@ -1424,6 +1350,8 @@ impl App {
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll(ctx);
+        #[cfg(debug_assertions)]
+        self.drive_shots(ctx);
         egui::TopBottomPanel::top("mode").show(ctx, |ui| {
             ui.add_space(6.0);
             ui.horizontal(|ui| {
@@ -1444,18 +1372,38 @@ impl eframe::App for App {
                         if ui.small_button("Manage…").clicked() {
                             open_url(DASHBOARD_URL);
                         }
-                        if let Some(e) = &self.license.email {
-                            ui.label(RichText::new(e).small().weak());
+                        if let Some(e) = self.license.email.as_deref().filter(|e| !e.is_empty()) {
+                            ui.label(RichText::new(shorten(e, 32)).small().weak())
+                                .on_hover_text(e);
                         }
                     } else {
-                        if ui.button(RichText::new("Activate Pro…").strong()).clicked()
+                        // Buying and pasting a key are rarer than signing in,
+                        // so they share one small menu and the bar never overflows.
+                        ui.menu_button("…", |ui| {
+                            if ui.button("Buy Pro…").clicked() {
+                                open_url(PRICING_URL);
+                                ui.close_menu();
+                            }
+                            if ui.button("Enter Key…").clicked() {
+                                self.browser = None;
+                                self.key_entry = Some(String::new());
+                                self.key_error = None;
+                                ui.close_menu();
+                            }
+                        })
+                        .response
+                        .on_hover_text("Buy Pro, or paste a licence key you already have.");
+                        if ui
+                            .add_enabled(
+                                self.license_rx.is_none(),
+                                egui::Button::new(RichText::new("Activate Pro…").strong()),
+                            )
+                            .on_hover_text("Sign in at gorse.is in your browser to turn on Pro for this computer.")
+                            .clicked()
                             && self.browser.is_none()
                         {
                             self.key_entry = None;
                             self.browser = Some(BrowserFlow::start());
-                        }
-                        if ui.small_button("Upgrade to Pro").clicked() {
-                            open_url(PRICING_URL);
                         }
                     }
                     egui::Frame::new()
@@ -1469,6 +1417,12 @@ impl eframe::App for App {
                                     .strong()
                                     .color(badge_color),
                             );
+                        })
+                        .response
+                        .on_hover_text(if paid {
+                            format!("This computer is on Gorse {}.", self.license.label())
+                        } else {
+                            "This computer is on the free plan. Pro adds Verify, the stamped report, the whole-home scan and scheduled checks.".to_string()
                         });
                 });
             });
@@ -1502,7 +1456,7 @@ impl eframe::App for App {
                             }
                         }
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if ui.small_button("✕").clicked() {
+                            if ui.small_button("🗙").clicked() {
                                 self.update_dismissed = true;
                             }
                         });
@@ -1621,93 +1575,136 @@ impl eframe::App for App {
         egui::TopBottomPanel::top("header").show(ctx, |ui| {
             ui.add_space(8.0);
             ui.horizontal(|ui| {
-                ui.vertical(|ui| {
-                    ui.heading("Fast scan: what this computer reaches");
-                    ui.label(RichText::new(self.subtitle()).small().weak());
-                    ui.label(
-                        RichText::new("The places tools keep credentials, about 60 known locations, not every file. Deep Scan reads everything else.")
-                            .small()
-                            .weak(),
-                    );
-                });
+                ui.heading("Fast scan: what this computer reaches");
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let busy = self.running.is_some();
-                    let label = if busy { "Scanning…" } else if self.report.is_some() { "Run Again" } else { "Run Fast Scan" };
-                    if ui.add_enabled(!busy, egui::Button::new(label)).clicked() {
+                    let run_label = if busy && !self.verifying {
+                        "Checking…"
+                    } else if self.report.is_some() {
+                        "Run Again"
+                    } else {
+                        "Run Fast Scan"
+                    };
+                    if ui
+                        .add_enabled(!busy, egui::Button::new(RichText::new(run_label).strong()))
+                        .clicked()
+                    {
                         self.start();
                     }
-                    if ui
-                        .add_enabled(!busy && !self.verify_armed, egui::Button::new("Verify with providers (Pro)"))
-                        .on_hover_text(VERIFY_EXPLANATION)
+                    if busy && self.verifying {
+                        ui.add_enabled(false, egui::Button::new("Verifying…"));
+                        ui.spinner();
+                    } else if ui
+                        // Stays enabled on Free so the journey is visible: the
+                        // checker refuses and the pricing message appears.
+                        .add_enabled(!busy, egui::Button::new("Verify with providers"))
+                        .on_hover_text(if self.license.is_paid() {
+                            "Ask your own provider tools, read-only, which findings are real."
+                        } else {
+                            "Verify is part of Gorse Pro. Choosing it shows what it does and where to get a key."
+                        })
                         .clicked()
                     {
-                        self.verify_armed = true;
-                        self.verify_refused = None;
+                        self.verify_tapped();
                     }
-                    let has_html = self.html.is_some();
-                    if ui
-                        .add_enabled(has_html, egui::Button::new("Save Report…"))
-                        .clicked()
-                    {
-                        self.save_report();
-                    }
-                    if ui
-                        .add_enabled(has_html, egui::Button::new("Open Report"))
-                        .clicked()
-                    {
-                        if let Some(h) = &self.html {
-                            open_path(h);
+                    if self.report.is_some() {
+                        let has_html = self.html.is_some();
+                        if ui
+                            .add_enabled(has_html, egui::Button::new("Save Report…"))
+                            .clicked()
+                        {
+                            self.save_report();
+                        }
+                        if ui
+                            .add_enabled(has_html, egui::Button::new("Open Report"))
+                            .clicked()
+                        {
+                            if let Some(h) = &self.html {
+                                open_path(h);
+                            }
                         }
                     }
                 });
             });
+            ui.add(egui::Label::new(RichText::new(self.subtitle()).small().weak()).wrap());
+            ui.add(
+                egui::Label::new(
+                    RichText::new("Fast scan: the places tools keep credentials, about 60 known locations, not every file. Deep Scan reads everything else.")
+                        .small()
+                        .color(Color32::GRAY),
+                )
+                .wrap(),
+            );
             if self.verify_armed {
                 ui.add_space(6.0);
-                ui.horizontal_wrapped(|ui| {
-                    ui.label(RichText::new(VERIFY_EXPLANATION).small());
-                    if ui.small_button("Verify now").clicked() {
-                        self.start_verify();
-                    }
-                    if ui.small_button("Cancel").clicked() {
-                        self.verify_armed = false;
-                    }
-                });
+                egui::Frame::new()
+                    .fill(Color32::from_rgb(52, 120, 220).linear_multiply(0.10))
+                    .inner_margin(egui::Margin::same(8))
+                    .corner_radius(6)
+                    .show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        ui.label(RichText::new("Verify with providers").small().strong());
+                        ui.add(egui::Label::new(RichText::new(VERIFY_EXPLANATION).small().weak()).wrap());
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.button(RichText::new("Verify now").strong()).clicked() {
+                                self.start_verify();
+                            }
+                            if ui.button("Not now").clicked() {
+                                self.verify_armed = false;
+                            }
+                        });
+                    });
             }
             if let Some(refusal) = self.verify_refused.clone() {
                 ui.add_space(6.0);
-                ui.horizontal_wrapped(|ui| {
-                    ui.label(RichText::new(refusal).small().color(severity_color("high")));
-                    if ui.small_button("Upgrade to Pro").clicked() {
-                        open_url(PRICING_URL);
-                    }
-                    ui.label(RichText::new(PRICING_URL).small().weak());
-                });
+                egui::Frame::new()
+                    .fill(Color32::from_rgb(40, 167, 69).linear_multiply(0.08))
+                    .inner_margin(egui::Margin::same(8))
+                    .corner_radius(6)
+                    .show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label(RichText::new(refusal.clone()).small().weak());
+                            if ui.link(RichText::new("See pricing").small()).clicked() {
+                                open_url(PRICING_URL);
+                            }
+                            if ui.small_button("🗙").on_hover_text("Dismiss").clicked() {
+                                self.verify_refused = None;
+                            }
+                        });
+                    });
             }
             if let Some(report) = self.report.clone() {
                 ui.add_space(8.0);
-                self.summary_strip(ui, &report.summary);
+                self.summary_strip(ui, &report);
                 let unassessed = report.unassessed_count();
                 if unassessed > 0 {
                     ui.label(
                         RichText::new(format!(
-                            "+ {unassessed} not assessed: earlier findings not counted above that may still be present."
+                            "+ {unassessed} not assessed: earlier findings not counted above that may still be present"
                         ))
                         .small()
                         .color(AMBER),
                     );
                 }
-                if report.verified == Some(true) {
-                    ui.label(
-                        RichText::new(format!(
-                            "Verified with providers: {}.",
-                            VerificationCounts::of(&report).summary()
-                        ))
-                        .small(),
-                    );
+                if report.is_incomplete() {
+                    ui.label(RichText::new("counts from an incomplete check").small().color(AMBER));
+                }
+                let counts = VerificationCounts::of(&report);
+                if report.verified == Some(true) || counts.attempted() > 0 {
+                    // The checker's own tally: a provider query that failed
+                    // is a failure, not an inference.
+                    let line = RichText::new(format!(
+                        "Verified with providers: {}",
+                        counts.summary().replace(", ", " · ")
+                    ))
+                    .small();
+                    ui.label(if counts.failed > 0 { line.color(AMBER) } else { line.weak() });
                 }
             }
             ui.add_space(8.0);
         });
+        egui::TopBottomPanel::bottom("schedule").show(ctx, |ui| self.schedule_card(ui));
 
         egui::CentralPanel::default().show(ctx, |ui| {
             if let Some(message) = self.error.clone() {
@@ -1717,7 +1714,11 @@ impl eframe::App for App {
                     ui.add_space(80.0);
                     ui.spinner();
                     ui.add_space(8.0);
-                    ui.label("Reading credential files, agent settings and signed-in sessions on this computer…");
+                    ui.label(if self.verifying {
+                        "Reading credential files on this computer, then asking your installed provider tools read-only questions. Nothing is sent to Gorse…"
+                    } else {
+                        "Reading credential files, agent settings and signed-in sessions on this computer…"
+                    });
                     ui.label(RichText::new("Nothing leaves this computer. No secret is shown.").small().weak());
                 });
             } else if let Some(report) = self.report.clone() {
@@ -1743,172 +1744,6 @@ impl eframe::App for App {
 }
 
 impl App {
-    fn files_ui(&mut self, ctx: &egui::Context) {
-        egui::TopBottomPanel::top("files-header").show(ctx, |ui| {
-            ui.add_space(8.0);
-            ui.horizontal(|ui| {
-                ui.vertical(|ui| {
-                    ui.heading("Deep scan: files for secrets");
-                    let sub = match &self.scan {
-                        None => "Documents, Desktop, Downloads and Pictures, including the text inside screenshots. Nothing leaves this computer.".to_string(),
-                        Some(r) => {
-                            let mut t = format!("{} finding{} in {} file{}", r.total, if r.total == 1 { "" } else { "s" }, r.files_scanned, if r.files_scanned == 1 { "" } else { "s" });
-                            if r.elapsed_secs > 0 { t.push_str(&format!(", {}s", r.elapsed_secs)); }
-                            if r.interrupted { t.push_str(" (stopped early)"); }
-                            if let Some(th) = r.engines.iter().find(|e| e.name == "trufflehog") {
-                                if th.error.is_none() {
-                                    t.push_str(&format!(" · with TruffleHog {}", th.version.clone().unwrap_or_default()));
-                                } else {
-                                    t.push_str(" · TruffleHog failed");
-                                }
-                            }
-                            t
-                        }
-                    };
-                    ui.label(RichText::new(sub).small().weak());
-                });
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let busy = self.scan_running.is_some();
-                    let label = if busy { "Scanning…" } else if self.whole_home { "Deep Scan, Whole Home" } else { "Deep Scan" };
-                    if ui.add_enabled(!busy, egui::Button::new(label)).clicked() {
-                        self.scan_error = None;
-                        *self.scan_progress.lock().unwrap() = ScanProgress::default();
-                        self.scan_running = Some(run_scan(self.whole_home, self.scan_progress.clone()));
-                    }
-                    let paid = self.license.is_paid();
-                    if !paid { self.whole_home = false; }
-                    ui.add_enabled(!busy && paid, egui::Checkbox::new(&mut self.whole_home, "Whole home folder (Pro, slower)"));
-                    if !paid {
-                        if ui.small_button("Upgrade to Pro").clicked() { open_url(PRICING_URL); }
-                        ui.label(RichText::new("Free plan").small().weak());
-                    }
-                });
-            });
-            ui.add_space(6.0);
-            if self.engine.installed {
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new(if self.engine.managed {
-                        format!("TruffleHog {} is installed: its ≈800 detectors run with every Deep Scan, verification off.", self.engine.version.clone().unwrap_or_default())
-                    } else {
-                        "TruffleHog found on this computer: its detectors run with every Deep Scan, verification off.".to_string()
-                    }).small().weak());
-                });
-            } else if self.install_rx.is_some() {
-                let p = self.install_progress.lock().unwrap().clone();
-                let mb = p.received as f64 / 1_048_576.0;
-                match p.total {
-                    Some(t) if t > 0 => {
-                        ui.add(egui::ProgressBar::new((p.received as f64 / t as f64).min(1.0) as f32).text(format!("Downloading TruffleHog… {:.0} of {:.0} MB", mb, t as f64 / 1_048_576.0)));
-                    }
-                    _ => { ui.label(format!("Downloading TruffleHog… {mb:.0} MB")); }
-                }
-                ctx.request_repaint_after(Duration::from_millis(250));
-            } else {
-                ui.horizontal_wrapped(|ui| {
-                    ui.label(RichText::new("Add TruffleHog's ≈800 detectors.").small().strong());
-                    ui.label(RichText::new(format!("Open source, by Truffle Security. A {} MB download from GitHub (about 175 MB on disk), checked against a known checksum and kept in Gorse's own folder. Runs with verification off, so nothing leaves this computer.", self.engine.download_mb)).small().weak());
-                    if ui.small_button("Add TruffleHog").clicked() {
-                        self.install_error = None;
-                        *self.install_progress.lock().unwrap() = DownloadProgress::default();
-                        let progress = self.install_progress.clone();
-                        let (tx, rx) = channel();
-                        std::thread::spawn(move || {
-                            let _ = tx.send(install_trufflehog(progress));
-                        });
-                        self.install_rx = Some(rx);
-                    }
-                });
-                if let Some(e) = &self.install_error {
-                    ui.label(RichText::new(e).small().color(severity_color("critical")));
-                }
-            }
-            ui.add_space(8.0);
-        });
-        egui::CentralPanel::default().show(ctx, |ui| {
-            if let Some(message) = self.scan_error.clone() {
-                placeholder(ui, "The scan could not complete", &message);
-            } else if self.scan_running.is_some() {
-                ui.vertical_centered(|ui| {
-                    ui.add_space(80.0);
-                    ui.spinner();
-                    ui.add_space(8.0);
-                    let p = self.scan_progress.lock().unwrap().clone();
-                    match p.phase.as_deref() {
-                        Some("images") => { ui.label("Reading the text inside pictures…"); }
-                        Some("notes") => { ui.label("Reading notes…"); }
-                        Some("trufflehog") => {
-                            ui.label("Running TruffleHog's detectors…");
-                        }
-                        Some(_) => { ui.label("Finishing…"); }
-                        None if p.files == 0 && p.dir.is_none() => { ui.label("Starting…"); }
-                        None => {
-                            ui.label(RichText::new(format!("{} files read · {} finding{} so far", p.files, p.findings, if p.findings == 1 { "" } else { "s" })).strong());
-                            if let Some(d) = &p.dir { ui.label(RichText::new(home_abbrev(d)).monospace().small().weak()); }
-                        }
-                    }
-                    ctx.request_repaint_after(Duration::from_millis(250));
-                });
-            } else if let Some(report) = self.scan.clone() {
-                let gaps = report.coverage.as_ref().map(|c| c.has_gaps.unwrap_or(!c.complete)).unwrap_or(true) || report.interrupted;
-                if let Some(c) = &report.coverage {
-                    if gaps {
-                        let mut why = Vec::new();
-                        if c.permission_denied > 0 { why.push(format!("{} files could not be read (permission denied)", c.permission_denied)); }
-                        if c.files_over_size_limit > 0 { why.push(format!("{} files over the size limit", c.files_over_size_limit)); }
-                        if c.files_skipped_by_type > 0 { why.push(format!("{} files of a type that is checked by name only", c.files_skipped_by_type)); }
-                        if c.dirs_skipped_by_rule > 0 { why.push(format!("{} app or developer folders skipped", c.dirs_skipped_by_rule)); }
-                        if let Some(l) = &c.limit_reached { why.push(format!("stopped early: {l}")); }
-                        ui.label(RichText::new(format!("Scan finished with gaps: {}.", if why.is_empty() { "not everything was checked".to_string() } else { why.join("; ") })).small().color(severity_color("high")));
-                        ui.separator();
-                    }
-                }
-                if report.findings.is_empty() {
-                    placeholder(ui, if gaps { "No secrets found in the files that were checked" } else { "No secrets found" },
-                        &format!("{} files were read.", report.files_scanned));
-                } else {
-                    let mut findings = report.findings.clone();
-                    findings.sort_by(|a, b| severity_rank(&a.severity).cmp(&severity_rank(&b.severity)).then_with(|| a.category.cmp(&b.category)));
-                    egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-                        let mut current = String::new();
-                        for f in &findings {
-                            if f.category != current {
-                                current = f.category.clone();
-                                ui.add_space(8.0);
-                                let n = findings.iter().filter(|x| x.category == current).count();
-                                ui.horizontal(|ui| {
-                                    ui.label(RichText::new(&current).strong());
-                                    ui.label(RichText::new(n.to_string()).weak());
-                                });
-                                ui.separator();
-                            }
-                            egui::Frame::new().inner_margin(egui::Margin::symmetric(4, 5)).show(ui, |ui| {
-                                ui.horizontal(|ui| {
-                                    badge(ui, &f.severity);
-                                    ui.label(RichText::new(home_abbrev(&f.path)).monospace().small());
-                                    if f.line > 0 { ui.label(RichText::new(format!("line {}", f.line)).small().weak()); }
-                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                        if let Some(g) = &f.rotation_guide {
-                                            if ui.small_button("How to rotate").clicked() {
-                                                open_url(g);
-                                            }
-                                        }
-                                        if ui.small_button("Show file").clicked() { reveal_path(Path::new(&f.path)); }
-                                    });
-                                });
-                                if !f.description.is_empty() { ui.label(RichText::new(&f.description).small().weak()); }
-                                if !f.preview.is_empty() { ui.label(RichText::new(&f.preview).monospace().small().weak()); }
-                            });
-                        }
-                        ui.add_space(16.0);
-                    });
-                }
-            } else {
-                placeholder(ui, "Ready to scan",
-                    "Click Deep Scan. Gorse reads your documents, downloads, code and screenshots for API keys, passwords, private keys, seed phrases, card numbers and other sensitive content. Whole home folder covers everything you own.");
-            }
-        });
-    }
-
     fn subtitle(&self) -> String {
         match &self.report {
             None => "If this laptop were stolen tonight, what could they get into?".to_string(),
@@ -1936,7 +1771,11 @@ impl App {
         }
     }
 
-    fn summary_strip(&self, ui: &mut egui::Ui, s: &Summary) {
+    fn summary_strip(&self, ui: &mut egui::Ui, report: &Report) {
+        let s = &report.summary;
+        // Two different counts: findings with any path to a production
+        // target (counted here) and the checker's narrower count of
+        // indirect signing and financial paths.
         let tiles = [
             ("Credentials", s.credentials, Color32::GRAY),
             (
@@ -1945,7 +1784,12 @@ impl App {
                 severity_color("critical"),
             ),
             (
-                "Paths to production",
+                "Findings reaching production",
+                report.findings_reaching_production(),
+                severity_color("critical"),
+            ),
+            (
+                "Critical indirect paths",
                 s.critical_indirect_paths.unwrap_or(0),
                 severity_color("high"),
             ),
@@ -1960,22 +1804,35 @@ impl App {
                 severity_color("low"),
             ),
         ];
-        ui.horizontal(|ui| {
-            for (label, value, color) in tiles {
-                egui::Frame::group(ui.style()).show(ui, |ui| {
-                    ui.set_min_width(130.0);
-                    ui.vertical(|ui| {
-                        let c = if value > 0 { color } else { Color32::GRAY };
-                        ui.label(
-                            RichText::new(value.to_string())
-                                .size(22.0)
-                                .strong()
-                                .color(c),
-                        );
-                        ui.label(RichText::new(label).small().weak());
-                    });
-                });
+        // Counts from a check that could not read everything are faded, so
+        // a low number is not mistaken for the whole picture.
+        let dimmed = report.is_incomplete();
+        ui.scope(|ui| {
+            if dimmed {
+                ui.multiply_opacity(0.45);
             }
+            ui.columns(tiles.len(), |cols| {
+                for (col, (label, value, color)) in cols.iter_mut().zip(tiles) {
+                    let tint = if value > 0 { color } else { Color32::GRAY };
+                    egui::Frame::new()
+                        .fill(tint.linear_multiply(if value > 0 { 0.10 } else { 0.04 }))
+                        .inner_margin(egui::Margin::symmetric(10, 6))
+                        .corner_radius(8)
+                        .show(col, |ui| {
+                            ui.set_width(ui.available_width());
+                            ui.label(
+                                RichText::new(value.to_string())
+                                    .size(22.0)
+                                    .strong()
+                                    .color(tint),
+                            );
+                            ui.add(
+                                egui::Label::new(RichText::new(label).small().weak()).truncate(),
+                            )
+                            .on_hover_text(label);
+                        });
+                }
+            });
         });
     }
 
@@ -2091,8 +1948,13 @@ impl App {
                             }
                         }
                         if let Some(loc) = &f.location {
-                            if !loc.is_empty() && ui.small_button("Show file").clicked() {
-                                reveal_path(Path::new(loc));
+                            if !loc.is_empty() {
+                                if ui.small_button("🗐").on_hover_text("Copy location").clicked() {
+                                    ui.ctx().copy_text(loc.clone());
+                                }
+                                if ui.small_button("Show file").clicked() {
+                                    reveal_path(Path::new(loc));
+                                }
                             }
                         }
                     });
@@ -2115,7 +1977,7 @@ impl App {
                     paths.len().min(2)
                 };
                 for p in paths.iter().take(shown) {
-                    let mut text = format!("→ {}", p.target);
+                    let mut text = format!("↪ {}", p.target);
                     if let Some(o) = &p.outcome_label {
                         if !o.is_empty() {
                             text.push_str(": ");
@@ -2175,6 +2037,13 @@ impl App {
                     }
                     if !f.evidence.is_empty() {
                         detail_block(ui, "Evidence", &f.evidence);
+                    }
+                    if let Some(line) = f.verification.as_ref().and_then(verification_line) {
+                        let color = match f.verification.as_ref().map(|v| v.status.as_str()) {
+                            Some("failed") => AMBER,
+                            _ => Color32::GRAY,
+                        };
+                        ui.add(egui::Label::new(RichText::new(line).small().color(color)).wrap());
                     }
                     let mut meta = Vec::new();
                     if let Some(c) = &f.confidence {
@@ -2380,6 +2249,15 @@ fn placeholder(ui: &mut egui::Ui, title: &str, detail: &str) {
             ui.add(egui::Label::new(RichText::new(detail).weak()).wrap());
         }
     });
+}
+
+/// `s` cut to `max` characters with an ellipsis.
+fn shorten(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        s.to_string()
+    } else {
+        s.chars().take(max.saturating_sub(1)).collect::<String>() + "…"
+    }
 }
 
 fn capitalize(s: &str) -> String {
@@ -2644,6 +2522,54 @@ mod tests {
     }
 
     #[test]
+    fn tiles_count_findings_reaching_production_and_provider_checks() {
+        let report: Report = serde_json::from_value(serde_json::json!({
+            "summary": {"credentials": 3, "critical_indirect_paths": 0,
+                "verification_counts": {"identity_confirmed": 0, "permission_confirmed": 0,
+                    "local_config": 0, "failed": 1, "unsupported": 0, "not_attempted": 2}},
+            "findings": [
+                {"name": "a", "severity": "critical", "paths": [
+                    {"target": "prod-db", "target_production": true},
+                    {"target": "staging", "target_production": false}]},
+                {"name": "b", "severity": "high", "paths": [{"target": "x"}]},
+                {"name": "c", "severity": "low",
+                 "verification": {"status": "failed", "detail": "aws sts get-caller-identity timed out"}}
+            ]
+        }))
+        .unwrap();
+        assert_eq!(report.findings_reaching_production(), 1);
+        let counts = VerificationCounts::of(&report);
+        assert_eq!(counts.attempted(), 1);
+        assert_eq!(
+            verification_line(report.findings[2].verification.as_ref().unwrap()).as_deref(),
+            Some("check failed: aws sts get-caller-identity timed out")
+        );
+        let quiet = FindingVerification {
+            status: "not_attempted".into(),
+            detail: String::new(),
+        };
+        assert_eq!(verification_line(&quiet), None);
+        let odd = FindingVerification {
+            status: "throttled".into(),
+            detail: String::new(),
+        };
+        assert_eq!(
+            verification_line(&odd).as_deref(),
+            Some("provider check throttled")
+        );
+        // A plain check: nothing attempted, no tally shown.
+        let plain: Report = serde_json::from_value(serde_json::json!({
+            "summary": {"credentials": 1}, "findings": [{"name": "a", "severity": "low"}]
+        }))
+        .unwrap();
+        assert_eq!(VerificationCounts::of(&plain).attempted(), 0);
+        assert_eq!(shorten("someone@example.com", 32), "someone@example.com");
+        assert_eq!(shorten("abcdef", 4), "abc…");
+        assert!(safe_url("https://docs.example.com/rotate#keys"));
+        assert!(!safe_url("https://x.example/a&b"));
+    }
+
+    #[test]
     fn confidence_labels() {
         let _ = finding(Some("confirmed"));
         assert_eq!(confidence_label(Some("Confirmed")), "confirmed");
@@ -2653,11 +2579,27 @@ mod tests {
     }
 }
 
+/// The first window size; development builds take `GORSE_SHOT_SIZE=WxH`.
+fn window_size() -> [f32; 2] {
+    #[cfg(debug_assertions)]
+    if let Some((w, h)) = std::env::var("GORSE_SHOT_SIZE")
+        .ok()
+        .and_then(|v| {
+            v.split_once('x')
+                .map(|(w, h)| (w.parse().ok(), h.parse().ok()))
+        })
+        .and_then(|(w, h)| Some((w?, h?)))
+    {
+        return [w, h];
+    }
+    [940.0, 640.0]
+}
+
 fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title(concat!("Gorse ", env!("CARGO_PKG_VERSION")))
-            .with_inner_size([940.0, 640.0])
+            .with_inner_size(window_size())
             .with_min_inner_size([760.0, 520.0]),
         ..Default::default()
     };

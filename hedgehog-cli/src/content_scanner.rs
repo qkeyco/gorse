@@ -10,10 +10,10 @@
 //! This module handles all file I/O, binary detection, and skip logic.
 
 use hedgehog_taint::content_patterns::{self, Confidence, ContentFinding, LineContext, Severity};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{mpsc, Arc, Mutex};
 
 /// Configuration for content scanning.
 pub struct ScanConfig {
@@ -25,17 +25,32 @@ pub struct ScanConfig {
     /// build-output folders, hidden folders, app bundles). Every file inside
     /// is still subject to the same per-file limits.
     pub include_skipped: bool,
+    /// Folders a stopped scan already finished: skipped when it resumes.
+    pub done_dirs: Option<Arc<std::collections::HashSet<PathBuf>>>,
 }
 
 impl Default for ScanConfig {
     fn default() -> Self {
         Self {
-            max_file_size: 1_048_576, // 1MB
+            // 4 MB: large enough for exported CSVs, logs, JSON dumps and
+            // long notes, where pasted credentials turn up. Raised from 1 MB
+            // once matching ran in parallel and numeric lines got a fast
+            // path; bigger files are counted as a gap, never silently.
+            max_file_size: DEFAULT_MAX_FILE_SIZE,
             scan_images: true,
             include_skipped: false,
+            done_dirs: None,
         }
     }
 }
+
+/// Default per-file size limit for the deep scan (4 MB).
+pub const DEFAULT_MAX_FILE_SIZE: u64 = 4 * 1_048_576;
+
+/// How deep `ScanEvent::DirDone` is reported: every level the scan reads,
+/// so a scan stopped inside one big folder still resumes from close by.
+/// Callers keep the list short by dropping folders inside finished ones.
+pub const DIR_DONE_DEPTH: usize = MAX_SCAN_DEPTH;
 
 /// Government classification and dissemination markings (TOP SECRET,
 /// SECRET, CONFIDENTIAL, CUI, NOFORN, ORCON, REL TO, portion marks) are
@@ -596,8 +611,12 @@ const SKIP_DIRS: &[&str] = &[
     "DAZ 3D",
 ];
 
-/// Max directory depth to prevent scanning into deeply nested app data.
-const MAX_SCAN_DEPTH: usize = 6;
+/// How many folder levels below a scan root are entered. Deep enough for
+/// real project and document trees (a checkout inside `Documents/GitHub`
+/// with `src/main/java/com/...` reaches 10 or more), while still bounding a
+/// walk into runaway nesting. Folders beyond it are counted as a gap.
+/// Was 6 until 0.4.19; raised once matching ran on several cores.
+const MAX_SCAN_DEPTH: usize = 12;
 
 /// What happened to one file during a scan.
 #[derive(Debug)]
@@ -633,12 +652,27 @@ fn is_binary_extension(extension: &str) -> bool {
 
 /// Scan a single file and say what was done with it.
 pub fn scan_file_outcome(path: &Path, config: &ScanConfig) -> FileOutcome {
+    match scan_file_outcome_until(path, config, None) {
+        Some(outcome) => outcome,
+        // Unreachable without an interrupt flag; kept total for safety.
+        None => FileOutcome::Scanned(Vec::new()),
+    }
+}
+
+/// [`scan_file_outcome`] that gives up part-way through a large file when
+/// `interrupt` is raised. `None` means the file was not fully checked and
+/// must not be counted.
+fn scan_file_outcome_until(
+    path: &Path,
+    config: &ScanConfig,
+    interrupt: Option<&AtomicBool>,
+) -> Option<FileOutcome> {
     let metadata = match std::fs::metadata(path) {
         Ok(m) => m,
-        Err(e) => return FileOutcome::Unreadable(e),
+        Err(e) => return Some(FileOutcome::Unreadable(e)),
     };
     if metadata.len() > config.max_file_size {
-        return FileOutcome::Oversize;
+        return Some(FileOutcome::Oversize);
     }
 
     let extension = path
@@ -657,22 +691,22 @@ pub fn scan_file_outcome(path: &Path, config: &ScanConfig) -> FileOutcome {
                 }
             }
         }
-        return FileOutcome::Image(findings);
+        return Some(FileOutcome::Image(findings));
     }
 
     if is_binary_extension(&extension) {
-        return FileOutcome::SkippedType(type_label(path));
+        return Some(FileOutcome::SkippedType(type_label(path)));
     }
 
     if metadata.len() == 0 {
-        return FileOutcome::Scanned(Vec::new());
+        return Some(FileOutcome::Scanned(Vec::new()));
     }
 
     // Read file contents. Everything that is not a known binary type is read
     // and sniffed, whatever its name.
     let contents = match std::fs::read(path) {
         Ok(c) => c,
-        Err(e) => return FileOutcome::Unreadable(e),
+        Err(e) => return Some(FileOutcome::Unreadable(e)),
     };
 
     let override_ctx = if is_history_file(path) {
@@ -684,33 +718,41 @@ pub fn scan_file_outcome(path: &Path, config: &ScanConfig) -> FileOutcome {
     // D-28: UTF-16 BOM detection — decode before scanning
     if let Some(decoded) = content_patterns::decode_utf16(&contents) {
         let lines: Vec<&str> = decoded.lines().collect();
-        return FileOutcome::Scanned(scan_lines(&lines, override_ctx, false));
+        return scan_lines(&lines, override_ctx, false, interrupt).map(FileOutcome::Scanned);
     }
 
     // Binary file detection: check first 512 bytes for null bytes
     let check_len = contents.len().min(512);
     if contents[..check_len].contains(&0u8) {
-        return FileOutcome::SkippedType(type_label(path));
+        return Some(FileOutcome::SkippedType(type_label(path)));
     }
 
     let text = match std::str::from_utf8(&contents) {
         Ok(t) => t,
-        Err(_) => return FileOutcome::SkippedType(type_label(path)),
+        Err(_) => return Some(FileOutcome::SkippedType(type_label(path))),
     };
 
     let lines: Vec<&str> = text.lines().collect();
-    FileOutcome::Scanned(scan_lines(&lines, override_ctx, true))
+    scan_lines(&lines, override_ctx, true, interrupt).map(FileOutcome::Scanned)
 }
 
+/// How many lines are checked between looks at the interrupt flag.
+const INTERRUPT_CHECK_LINES: usize = 1024;
+
 /// Run the line, base64, (optionally) unicode-obfuscation and multi-line
-/// checks over decoded text.
+/// checks over decoded text. `None` when `interrupt` was raised part-way.
 fn scan_lines(
     lines: &[&str],
     override_ctx: Option<LineContext>,
     unicode_check: bool,
-) -> Vec<ContentFinding> {
+    interrupt: Option<&AtomicBool>,
+) -> Option<Vec<ContentFinding>> {
+    let stopped = || interrupt.is_some_and(|flag| flag.load(Ordering::Relaxed));
     let mut findings = Vec::new();
     for (i, line) in lines.iter().enumerate() {
+        if i % INTERRUPT_CHECK_LINES == 0 && stopped() {
+            return None;
+        }
         findings.extend(content_patterns::check_line_with_context(
             line,
             i + 1,
@@ -721,8 +763,11 @@ fn scan_lines(
             findings.extend(content_patterns::check_unicode_obfuscated(line, i + 1));
         }
     }
+    if stopped() {
+        return None;
+    }
     findings.extend(content_patterns::check_multi_line(lines));
-    findings
+    Some(findings)
 }
 
 /// Check if a file path is a shell history file (findings get Executed context).
@@ -761,6 +806,8 @@ pub enum ScanEvent<'a> {
         findings_count: usize,
         result: &'a ScanResult,
     },
+    /// A folder (at most `DIR_DONE_DEPTH` below a root) was read in full.
+    DirDone { dir: &'a Path },
 }
 
 pub type ScanCallback<'a> = &'a mut dyn FnMut(ScanEvent<'_>);
@@ -1261,27 +1308,303 @@ pub fn scan_directory(dir: &Path, config: &ScanConfig) -> Vec<ScanResult> {
 
 /// Scan a directory recursively and report coverage: every file or folder
 /// that was not checked is counted by reason.
+///
+/// The folders are walked on the calling thread; files are read and checked
+/// on a small pool of worker threads ([`scan_workers`]). Results are put
+/// back into walk order before anything is recorded, so the findings, the
+/// coverage and every [`ScanEvent`] (always delivered on the calling
+/// thread) come out exactly as a one-file-at-a-time scan would produce
+/// them. `DirDone` for a folder is only sent once every file in it and its
+/// subfolders has been checked, and never after an interrupt.
 pub fn scan_directory_with_coverage(
     dir: &Path,
     config: &ScanConfig,
     interrupt: &Arc<AtomicBool>,
     callback: Option<ScanCallback<'_>>,
 ) -> ScanOutcome {
-    let mut results = Vec::new();
-    let mut coverage = ScanCoverage::new(config);
-    let mut cb = callback;
-    scan_directory_recursive(
-        dir,
-        config,
-        interrupt,
-        &mut results,
-        &mut coverage,
-        &mut cb,
-        0,
-    );
+    let workers = scan_workers();
+    let (job_tx, job_rx) = mpsc::channel::<(u64, PathBuf)>();
+    let (done_tx, done_rx) = mpsc::channel::<(u64, Option<FileOutcome>)>();
+    let job_rx = Mutex::new(job_rx);
+    let (results, mut coverage) = std::thread::scope(|scope| {
+        for _ in 0..workers {
+            let done_tx = done_tx.clone();
+            let job_rx = &job_rx;
+            let interrupt: &AtomicBool = interrupt;
+            scope.spawn(move || scan_worker(job_rx, done_tx, config, interrupt));
+        }
+        drop(done_tx);
+        let mut pipe = ScanPipeline {
+            jobs: Some(job_tx),
+            done: done_rx,
+            pending: VecDeque::new(),
+            ready: HashMap::new(),
+            next_id: 0,
+            in_flight: 0,
+            max_in_flight: workers * IN_FLIGHT_PER_WORKER,
+            halted: false,
+            config,
+            interrupt,
+            results: Vec::new(),
+            coverage: ScanCoverage::new(config),
+            callback,
+        };
+        scan_directory_recursive(dir, config, interrupt, &mut pipe, 0);
+        pipe.finish();
+        (pipe.results, pipe.coverage)
+    });
     coverage.interrupted |= interrupt.load(Ordering::Relaxed);
     coverage.finalize();
     ScanOutcome { results, coverage }
+}
+
+/// Upper bound on file-checking threads. Matching is CPU-bound; beyond
+/// eight threads the walk and the disk become the limit, and a scan should
+/// not take over a large machine.
+const MAX_SCAN_WORKERS: usize = 8;
+
+/// Files handed to each worker that have not come back yet. Enough to keep
+/// every worker busy while one slow file holds up the in-order results,
+/// small enough to bound memory and keep progress events current.
+const IN_FLIGHT_PER_WORKER: usize = 32;
+
+/// How long the walker waits for a result before looking at the interrupt
+/// flag again.
+const RESULT_POLL: std::time::Duration = std::time::Duration::from_millis(50);
+
+/// Threads that read and check files: one per core, leaving one core for
+/// the walk and the rest of the computer, at most [`MAX_SCAN_WORKERS`].
+fn scan_workers() -> usize {
+    std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1)
+        .saturating_sub(1)
+        .clamp(1, MAX_SCAN_WORKERS)
+}
+
+/// One worker: take a file, check it, send the outcome back. `None` means
+/// the scan was interrupted before the file was fully checked.
+fn scan_worker(
+    jobs: &Mutex<mpsc::Receiver<(u64, PathBuf)>>,
+    done: mpsc::Sender<(u64, Option<FileOutcome>)>,
+    config: &ScanConfig,
+    interrupt: &AtomicBool,
+) {
+    loop {
+        let job = jobs.lock().unwrap_or_else(|e| e.into_inner()).recv();
+        let Ok((id, path)) = job else {
+            return;
+        };
+        let outcome = if interrupt.load(Ordering::Relaxed) {
+            None
+        } else {
+            // A panic while checking one file must not hang the walker,
+            // which waits for every result in order: report the file as
+            // unreadable instead.
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                scan_file_outcome_until(&path, config, Some(interrupt))
+            }))
+            .unwrap_or_else(|_| {
+                Some(FileOutcome::Unreadable(std::io::Error::other(
+                    "could not be checked (internal error)",
+                )))
+            })
+        };
+        if done.send((id, outcome)).is_err() {
+            return;
+        }
+    }
+}
+
+/// One step of a scan in walk order. Files are checked out of order by the
+/// workers; everything is recorded in this order.
+enum ScanStep {
+    EnterDir(PathBuf),
+    File(u64, PathBuf),
+    SkippedDir(String),
+    Unreadable(PathBuf, std::io::Error),
+    DepthLimit,
+    SkippedOther(PathBuf),
+    DirDone(PathBuf),
+}
+
+/// The walker's side of a parallel scan: sends files to the workers, puts
+/// their outcomes back in walk order and records them.
+struct ScanPipeline<'a, 'cb> {
+    jobs: Option<mpsc::Sender<(u64, PathBuf)>>,
+    done: mpsc::Receiver<(u64, Option<FileOutcome>)>,
+    /// Steps not yet recorded, oldest first.
+    pending: VecDeque<ScanStep>,
+    /// Outcomes that came back before the steps ahead of them were recorded.
+    ready: HashMap<u64, Option<FileOutcome>>,
+    next_id: u64,
+    in_flight: usize,
+    max_in_flight: usize,
+    /// A file was abandoned by an interrupt: nothing after it is recorded.
+    halted: bool,
+    config: &'a ScanConfig,
+    interrupt: &'a Arc<AtomicBool>,
+    results: Vec<ScanResult>,
+    coverage: ScanCoverage,
+    callback: Option<ScanCallback<'cb>>,
+}
+
+impl ScanPipeline<'_, '_> {
+    fn interrupted(&self) -> bool {
+        self.interrupt.load(Ordering::Relaxed)
+    }
+
+    /// Queue a step that needs no worker and record whatever is ready.
+    fn step(&mut self, step: ScanStep) {
+        self.pending.push_back(step);
+        self.collect(false);
+    }
+
+    /// Hand a file to the workers. Waits while too many are outstanding.
+    fn file(&mut self, path: PathBuf) {
+        let id = self.next_id;
+        self.next_id += 1;
+        let sent = self
+            .jobs
+            .as_ref()
+            .is_some_and(|jobs| jobs.send((id, path.clone())).is_ok());
+        if sent {
+            self.in_flight += 1;
+        } else {
+            // No worker left (they only stop when the walk is over);
+            // check the file here rather than lose it.
+            let outcome = scan_file_outcome_until(&path, self.config, None);
+            self.ready.insert(id, outcome);
+        }
+        self.pending.push_back(ScanStep::File(id, path));
+        self.collect(false);
+        while self.in_flight >= self.max_in_flight && !self.interrupted() {
+            self.collect(true);
+        }
+    }
+
+    /// Take finished outcomes (waiting up to [`RESULT_POLL`] for one when
+    /// `wait` is set), then record every step that is now in order.
+    fn collect(&mut self, wait: bool) {
+        if wait && self.in_flight > 0 {
+            match self.done.recv_timeout(RESULT_POLL) {
+                Ok((id, outcome)) => {
+                    self.in_flight -= 1;
+                    self.ready.insert(id, outcome);
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected) => self.in_flight = 0,
+            }
+        }
+        while let Ok((id, outcome)) = self.done.try_recv() {
+            self.in_flight -= 1;
+            self.ready.insert(id, outcome);
+        }
+        self.record_ready();
+    }
+
+    /// Stop handing out files and record everything still outstanding.
+    /// After an interrupt the workers skip what is left, so this returns
+    /// at once.
+    fn finish(&mut self) {
+        self.jobs = None;
+        while self.in_flight > 0 {
+            self.collect(true);
+        }
+        self.record_ready();
+    }
+
+    fn record_ready(&mut self) {
+        while !self.halted {
+            let Some(front) = self.pending.front() else {
+                return;
+            };
+            if let ScanStep::File(id, _) = front {
+                match self.ready.remove(id) {
+                    None => return,
+                    Some(None) => {
+                        self.halted = true;
+                        self.pending.clear();
+                        return;
+                    }
+                    Some(Some(outcome)) => {
+                        let Some(ScanStep::File(_, path)) = self.pending.pop_front() else {
+                            unreachable!()
+                        };
+                        self.record_file(path, outcome);
+                    }
+                }
+                continue;
+            }
+            let Some(step) = self.pending.pop_front() else {
+                return;
+            };
+            match step {
+                ScanStep::EnterDir(dir) => {
+                    if let Some(cb) = self.callback.as_mut() {
+                        cb(ScanEvent::EnterDir {
+                            files_scanned: self.coverage.files_scanned,
+                            findings_count: self.results.len(),
+                            dir: &dir,
+                        });
+                    }
+                }
+                ScanStep::SkippedDir(name) => self.coverage.record_skipped_dir(&name),
+                ScanStep::Unreadable(path, error) => self.coverage.record_unreadable(&path, &error),
+                ScanStep::DepthLimit => self.coverage.record_depth_limit(),
+                ScanStep::SkippedOther(path) => self
+                    .coverage
+                    .record_skipped_other(&path, "not a regular file"),
+                ScanStep::DirDone(dir) => {
+                    if !self.interrupted() {
+                        if let Some(cb) = self.callback.as_mut() {
+                            cb(ScanEvent::DirDone { dir: &dir });
+                        }
+                    }
+                }
+                ScanStep::File(..) => unreachable!(),
+            }
+        }
+    }
+
+    fn record_file(&mut self, path: PathBuf, outcome: FileOutcome) {
+        let findings = match outcome {
+            FileOutcome::Scanned(findings) => {
+                self.coverage.record_scanned();
+                findings
+            }
+            FileOutcome::Image(findings) => {
+                self.coverage.record_image_scanned();
+                findings
+            }
+            FileOutcome::SkippedType(label) => {
+                self.coverage.record_skipped_type(&label);
+                return;
+            }
+            FileOutcome::Oversize => {
+                self.coverage.record_oversize(&path);
+                return;
+            }
+            FileOutcome::Unreadable(error) => {
+                self.coverage.record_unreadable(&path, &error);
+                return;
+            }
+        };
+        for finding in findings.into_iter().filter(|f| !is_silent(f)) {
+            let result = ScanResult {
+                path: path.clone(),
+                finding,
+            };
+            if let Some(cb) = self.callback.as_mut() {
+                cb(ScanEvent::Finding {
+                    files_scanned: self.coverage.files_scanned,
+                    findings_count: self.results.len() + 1,
+                    result: &result,
+                });
+            }
+            self.results.push(result);
+        }
+    }
 }
 
 /// Why a folder is not entered by default. `None` means scan it.
@@ -1308,39 +1631,93 @@ fn dir_skip_reason(name: &str, depth: usize) -> Option<&'static str> {
     None
 }
 
+/// A quick count of what a deep scan of `dir` will read: files within the
+/// size limit and their total bytes. Walks the same folders as the scan
+/// (same depth limit and skip rules) but opens no file, so it finishes long
+/// before the scan and lets the apps show a real progress bar.
+pub fn estimate_scan(
+    dir: &Path,
+    max_file_size: u64,
+    include_skipped: bool,
+    interrupt: &Arc<AtomicBool>,
+) -> (u64, u64) {
+    fn walk(
+        dir: &Path,
+        limits: (u64, bool),
+        interrupt: &Arc<AtomicBool>,
+        depth: usize,
+        acc: &mut (u64, u64),
+    ) {
+        if interrupt.load(Ordering::Relaxed) || depth > MAX_SCAN_DEPTH {
+            return;
+        }
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Ok(meta) = std::fs::metadata(&path) else {
+                continue;
+            };
+            if meta.is_dir() {
+                if !limits.1 {
+                    if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                        if dir_skip_reason(name, depth).is_some() {
+                            continue;
+                        }
+                    }
+                }
+                walk(&path, limits, interrupt, depth + 1, acc);
+            } else if meta.is_file() && meta.len() <= limits.0 {
+                acc.0 += 1;
+                acc.1 += meta.len();
+            }
+        }
+    }
+    let mut acc = (0, 0);
+    walk(
+        dir,
+        (max_file_size, include_skipped),
+        interrupt,
+        0,
+        &mut acc,
+    );
+    acc
+}
+
+/// Walk one folder in the same order and with the same rules as always,
+/// handing its files to the pipeline.
 fn scan_directory_recursive(
     dir: &Path,
     config: &ScanConfig,
     interrupt: &Arc<AtomicBool>,
-    results: &mut Vec<ScanResult>,
-    coverage: &mut ScanCoverage,
-    callback: &mut Option<ScanCallback<'_>>,
+    pipe: &mut ScanPipeline<'_, '_>,
     depth: usize,
 ) {
     if interrupt.load(Ordering::Relaxed) {
         return;
     }
     if depth > MAX_SCAN_DEPTH {
-        coverage.record_depth_limit();
+        pipe.step(ScanStep::DepthLimit);
+        return;
+    }
+    if config
+        .done_dirs
+        .as_ref()
+        .is_some_and(|done| done.contains(dir))
+    {
         return;
     }
 
     let entries = match std::fs::read_dir(dir) {
         Ok(e) => e,
         Err(error) => {
-            coverage.record_unreadable(dir, &error);
+            pipe.step(ScanStep::Unreadable(dir.to_path_buf(), error));
             return;
         }
     };
 
-    // Fire progress on directory entry
-    if let Some(ref mut cb) = callback {
-        cb(ScanEvent::EnterDir {
-            files_scanned: coverage.files_scanned,
-            findings_count: results.len(),
-            dir,
-        });
-    }
+    pipe.step(ScanStep::EnterDir(dir.to_path_buf()));
 
     for entry in entries {
         if interrupt.load(Ordering::Relaxed) {
@@ -1349,7 +1726,7 @@ fn scan_directory_recursive(
         let entry = match entry {
             Ok(entry) => entry,
             Err(error) => {
-                coverage.record_unreadable(dir, &error);
+                pipe.step(ScanStep::Unreadable(dir.to_path_buf(), error));
                 continue;
             }
         };
@@ -1360,61 +1737,22 @@ fn scan_directory_recursive(
             if !config.include_skipped {
                 if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
                     if dir_skip_reason(name, depth).is_some() {
-                        coverage.record_skipped_dir(name);
+                        pipe.step(ScanStep::SkippedDir(name.to_string()));
                         continue;
                     }
                 }
             }
-            scan_directory_recursive(
-                &path,
-                config,
-                interrupt,
-                results,
-                coverage,
-                callback,
-                depth + 1,
-            );
+            scan_directory_recursive(&path, config, interrupt, pipe, depth + 1);
         } else if path.is_file() {
-            let findings = match scan_file_outcome(&path, config) {
-                FileOutcome::Scanned(findings) => {
-                    coverage.record_scanned();
-                    findings
-                }
-                FileOutcome::Image(findings) => {
-                    coverage.record_image_scanned();
-                    findings
-                }
-                FileOutcome::SkippedType(label) => {
-                    coverage.record_skipped_type(&label);
-                    continue;
-                }
-                FileOutcome::Oversize => {
-                    coverage.record_oversize(&path);
-                    continue;
-                }
-                FileOutcome::Unreadable(error) => {
-                    coverage.record_unreadable(&path, &error);
-                    continue;
-                }
-            };
-            for finding in findings.into_iter().filter(|f| !is_silent(f)) {
-                let result = ScanResult {
-                    path: path.clone(),
-                    finding,
-                };
-                if let Some(ref mut cb) = callback {
-                    cb(ScanEvent::Finding {
-                        files_scanned: coverage.files_scanned,
-                        findings_count: results.len() + 1,
-                        result: &result,
-                    });
-                }
-                results.push(result);
-            }
+            pipe.file(path);
         } else {
             // Broken symlink, socket, FIFO or device: nothing to read.
-            coverage.record_skipped_other(&path, "not a regular file");
+            pipe.step(ScanStep::SkippedOther(path));
         }
+    }
+    if depth <= DIR_DONE_DEPTH && !interrupt.load(Ordering::Relaxed) {
+        // Recorded (and sent) only after every file queued before it.
+        pipe.step(ScanStep::DirDone(dir.to_path_buf()));
     }
 }
 
@@ -1424,12 +1762,22 @@ fn scan_directory_recursive(
 /// Phase 2 — Common dumping grounds (Desktop, Downloads, Documents)
 /// Phase 3 — Media (Pictures, for filename heuristic)
 pub fn smart_scan_dirs() -> Vec<PathBuf> {
-    let home = match std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")) {
-        Ok(h) => PathBuf::from(h),
-        Err(_) => return Vec::new(),
-    };
+    match std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")) {
+        Ok(h) => smart_scan_dirs_in(Path::new(&h)),
+        Err(_) => Vec::new(),
+    }
+}
 
+fn smart_scan_dirs_in(home: &Path) -> Vec<PathBuf> {
+    let home = home.to_path_buf();
     let mut dirs = Vec::new();
+
+    // Desktop first: it is where people drop things, and the apps list it
+    // straight after Apple Notes and the text in pictures.
+    let desktop = home.join("Desktop");
+    if desktop.exists() {
+        dirs.push(desktop);
+    }
 
     // Phase 1: Dotfiles and config dirs where secrets commonly live
     // Includes .hedgehog — our own logs/config could contain sensitive data
@@ -1461,9 +1809,19 @@ pub fn smart_scan_dirs() -> Vec<PathBuf> {
     }
 
     // Phase 2: Common dumping grounds
-    for d in &["Desktop", "Downloads", "Documents"] {
+    for d in &["Downloads", "Documents"] {
         let p = home.join(d);
         if p.exists() {
+            dirs.push(p);
+        }
+    }
+
+    // Phase 2b: code checkouts kept directly in the home folder (a GitHub
+    // folder inside Documents is already covered above). Both spellings are
+    // listed for case-sensitive file systems; duplicates are dropped.
+    for d in CODE_DIRS {
+        let p = home.join(d);
+        if p.is_dir() && !same_dir_listed(&dirs, &p) {
             dirs.push(p);
         }
     }
@@ -1475,6 +1833,129 @@ pub fn smart_scan_dirs() -> Vec<PathBuf> {
     }
 
     dirs
+}
+
+/// Folders in the home folder where people usually keep code checkouts.
+pub const CODE_DIRS: &[&str] = &[
+    "GitHub",
+    "github",
+    "Developer",
+    "Projects",
+    "projects",
+    "repos",
+    "Repos",
+    "code",
+    "Code",
+    "src",
+    "dev",
+    "git",
+    "workspace",
+    "Workspace",
+    "Sites",
+];
+
+/// True when `candidate` is a folder already in `dirs`, by identity rather
+/// than spelling: on a case-insensitive disk "GitHub" and "github" are one.
+fn same_dir_listed(dirs: &[PathBuf], candidate: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let id = |p: &Path| std::fs::metadata(p).ok().map(|m| (m.dev(), m.ino()));
+        let wanted = id(candidate);
+        dirs.iter()
+            .any(|d| d == candidate || (wanted.is_some() && id(d) == wanted))
+    }
+    #[cfg(not(unix))]
+    {
+        let wanted = candidate.to_string_lossy().to_lowercase();
+        dirs.iter()
+            .any(|d| d.to_string_lossy().to_lowercase() == wanted)
+    }
+}
+
+/// One place a default deep scan reads, for the apps to show before a scan.
+#[derive(serde::Serialize, Debug)]
+pub struct ScanPlace {
+    /// "settings", "folder", "code", "pictures" or "notes".
+    pub kind: &'static str,
+    pub label: String,
+    /// Absent for Apple Notes, which is a database rather than a folder.
+    pub path: Option<String>,
+    pub detail: String,
+}
+
+/// The places `scan --deep` reads when no folders are given, in the order
+/// it reads them: Apple Notes and the text in pictures first, then each
+/// folder, with the hidden settings folders as one entry after Desktop.
+pub fn default_scan_places() -> Vec<ScanPlace> {
+    let home = home_dir();
+    let mut settings = Vec::new();
+    let mut places = Vec::new();
+    if cfg!(target_os = "macos") {
+        places.push(ScanPlace {
+            kind: "notes",
+            label: "Apple Notes".into(),
+            path: None,
+            detail: "Read first. Needs Full Disk Access".into(),
+        });
+    }
+    // Text in pictures is read on every platform: Vision on macOS, the
+    // Windows OCR engine, tesseract on Linux.
+    places.push(ScanPlace {
+        kind: "pictures",
+        label: "Screenshots and photos".into(),
+        path: None,
+        detail: "The text inside pictures on the Desktop and in Documents, Downloads and Pictures"
+            .into(),
+    });
+    for dir in smart_scan_dirs() {
+        let name = dir
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let path = Some(dir.to_string_lossy().into_owned());
+        let (kind, detail) = if name.starts_with('.') {
+            settings.push(name);
+            continue;
+        } else if CODE_DIRS.contains(&name.as_str()) {
+            ("code", "Code checkouts")
+        } else if name == "Documents" {
+            (
+                "folder",
+                "Including code checkouts kept here, such as GitHub",
+            )
+        } else if name == "Pictures" {
+            (
+                "folder",
+                "Its other files; the text in its pictures is read above",
+            )
+        } else {
+            ("folder", "")
+        };
+        places.push(ScanPlace {
+            kind,
+            label: name,
+            path,
+            detail: detail.into(),
+        });
+    }
+    if !settings.is_empty() {
+        // Read straight after Desktop.
+        let at = places
+            .iter()
+            .position(|p| p.label == "Desktop")
+            .map_or(places.len().min(2), |i| i + 1);
+        places.insert(
+            at,
+            ScanPlace {
+                kind: "settings",
+                label: "Settings folders".into(),
+                path: home.map(|h| h.to_string_lossy().into_owned()),
+                detail: settings.join(", "),
+            },
+        );
+    }
+    places
 }
 
 /// Return the home directory for full `--all-dirs` scan.
@@ -2366,6 +2847,7 @@ mod tests {
             max_file_size: 100,
             scan_images: false,
             include_skipped: false,
+            done_dirs: None,
         };
 
         // Create a file larger than the limit
@@ -2682,6 +3164,7 @@ mod tests {
             max_file_size: 100,
             scan_images: false,
             include_skipped: false,
+            done_dirs: None,
         };
         let report = scan_directory_checked(&dir, &config, &Arc::new(AtomicBool::new(false)), None);
         assert!(!report.complete);
@@ -2871,6 +3354,219 @@ mod tests {
         })
     }
 
+    /// The old one-file-at-a-time walk, kept here as the reference the
+    /// parallel scan must reproduce exactly.
+    fn reference_walk(
+        dir: &Path,
+        config: &ScanConfig,
+        results: &mut Vec<(PathBuf, String)>,
+        coverage: &mut ScanCoverage,
+        depth: usize,
+    ) {
+        if depth > MAX_SCAN_DEPTH {
+            coverage.record_depth_limit();
+            return;
+        }
+        let entries = match std::fs::read_dir(dir) {
+            Ok(e) => e,
+            Err(error) => {
+                coverage.record_unreadable(dir, &error);
+                return;
+            }
+        };
+        for entry in entries {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                let name = path.file_name().unwrap().to_str().unwrap();
+                if !config.include_skipped && dir_skip_reason(name, depth).is_some() {
+                    coverage.record_skipped_dir(name);
+                    continue;
+                }
+                reference_walk(&path, config, results, coverage, depth + 1);
+            } else if path.is_file() {
+                let findings = match scan_file_outcome(&path, config) {
+                    FileOutcome::Scanned(f) => {
+                        coverage.record_scanned();
+                        f
+                    }
+                    FileOutcome::Image(f) => {
+                        coverage.record_image_scanned();
+                        f
+                    }
+                    FileOutcome::SkippedType(label) => {
+                        coverage.record_skipped_type(&label);
+                        continue;
+                    }
+                    FileOutcome::Oversize => {
+                        coverage.record_oversize(&path);
+                        continue;
+                    }
+                    FileOutcome::Unreadable(error) => {
+                        coverage.record_unreadable(&path, &error);
+                        continue;
+                    }
+                };
+                for f in findings.into_iter().filter(|f| !is_silent(f)) {
+                    results.push((path.clone(), format!("{:?}", f.secret_type)));
+                }
+            } else {
+                coverage.record_skipped_other(&path, "not a regular file");
+            }
+        }
+    }
+
+    /// A tree with findings, every skip reason and folders past the depth
+    /// limit, spread over enough files to keep several workers busy.
+    fn busy_tree() -> PathBuf {
+        let dir = create_test_dir();
+        let mut deep = dir.join("deep");
+        for level in 0..MAX_SCAN_DEPTH + 2 {
+            std::fs::create_dir_all(&deep).unwrap();
+            std::fs::write(deep.join(format!("k{level}.env")), AWS_KEY_LINE).unwrap();
+            deep = deep.join(format!("d{level}"));
+        }
+        for d in 0..6 {
+            let sub = dir.join(format!("folder{d}")).join("inner");
+            std::fs::create_dir_all(&sub).unwrap();
+            std::fs::create_dir_all(dir.join(format!("folder{d}")).join("node_modules")).unwrap();
+            for f in 0..25 {
+                let body = match f % 5 {
+                    0 => AWS_KEY_LINE.to_string(),
+                    1 => "card 4111 1111 1111 1111\n".to_string(),
+                    2 => "1.0,2.0,3.0\n".repeat(200),
+                    3 => "x".repeat(300),
+                    _ => "nothing here\n".to_string(),
+                };
+                std::fs::write(sub.join(format!("f{f}.txt")), &body).unwrap();
+                std::fs::write(
+                    dir.join(format!("folder{d}")).join(format!("g{f}.csv")),
+                    &body,
+                )
+                .unwrap();
+            }
+            std::fs::write(sub.join("a.pdf"), "%PDF").unwrap();
+            std::fs::write(sub.join("bin"), b"ab\0cd").unwrap();
+        }
+        dir
+    }
+
+    #[test]
+    fn parallel_scan_matches_one_file_at_a_time() {
+        let dir = busy_tree();
+        let config = ScanConfig {
+            max_file_size: 256,
+            ..Default::default()
+        };
+        let mut expected = Vec::new();
+        let mut reference = ScanCoverage::new(&config);
+        reference_walk(&dir, &config, &mut expected, &mut reference, 0);
+        reference.finalize();
+
+        let outcome = covered(&dir, &config);
+        let got: Vec<(PathBuf, String)> = outcome
+            .results
+            .iter()
+            .map(|r| (r.path.clone(), format!("{:?}", r.finding.secret_type)))
+            .collect();
+        assert!(expected.len() > 20, "the tree has findings: {expected:?}");
+        assert_eq!(got, expected, "same findings in the same order");
+        let c = &outcome.coverage;
+        assert_eq!(
+            (
+                c.files_scanned,
+                c.files_skipped_by_type,
+                c.files_over_size_limit,
+                c.files_unreadable,
+                c.dirs_skipped_by_rule,
+                c.dirs_beyond_depth_limit,
+                c.files_skipped_other,
+            ),
+            (
+                reference.files_scanned,
+                reference.files_skipped_by_type,
+                reference.files_over_size_limit,
+                reference.files_unreadable,
+                reference.dirs_skipped_by_rule,
+                reference.dirs_beyond_depth_limit,
+                reference.files_skipped_other,
+            )
+        );
+        assert!(c.dirs_beyond_depth_limit > 0 && c.files_over_size_limit > 0);
+        assert_eq!(c.oversize_examples, reference.oversize_examples);
+        assert_eq!(c.skipped_types, reference.skipped_types);
+        assert_eq!(c.skipped_dirs, reference.skipped_dirs);
+        cleanup_test_dir(&dir);
+    }
+
+    #[test]
+    fn dir_done_comes_after_every_file_below_it_and_counts_only_grow() {
+        let dir = busy_tree();
+        let mut seen_findings: Vec<PathBuf> = Vec::new();
+        let mut done: Vec<PathBuf> = Vec::new();
+        let mut last = (0usize, 0usize);
+        let mut on_event = |event: ScanEvent<'_>| match event {
+            ScanEvent::EnterDir {
+                files_scanned,
+                findings_count,
+                ..
+            } => {
+                assert!(files_scanned >= last.0 && findings_count >= last.1);
+                last = (files_scanned, findings_count);
+            }
+            ScanEvent::Finding {
+                files_scanned,
+                findings_count,
+                result,
+            } => {
+                assert!(files_scanned >= last.0 && findings_count == last.1 + 1);
+                last = (files_scanned, findings_count);
+                assert!(
+                    !done.iter().any(|d| result.path.starts_with(d)),
+                    "finding in {} after its folder was reported done",
+                    result.path.display()
+                );
+                seen_findings.push(result.path.clone());
+            }
+            ScanEvent::DirDone { dir } => done.push(dir.to_path_buf()),
+        };
+        let outcome = scan_directory_with_coverage(
+            &dir,
+            &ScanConfig::default(),
+            &Arc::new(AtomicBool::new(false)),
+            Some(&mut on_event),
+        );
+        assert_eq!(seen_findings.len(), outcome.results.len());
+        assert_eq!(last.1, outcome.results.len());
+        assert_eq!(done.last(), Some(&dir), "the root is done last");
+        cleanup_test_dir(&dir);
+    }
+
+    #[test]
+    fn interrupt_stops_the_parallel_scan_without_marking_folders_done() {
+        let dir = busy_tree();
+        let interrupt = Arc::new(AtomicBool::new(false));
+        let stop = interrupt.clone();
+        let mut done_after_stop = 0;
+        let mut on_event = |event: ScanEvent<'_>| match event {
+            ScanEvent::Finding { .. } => stop.store(true, Ordering::Relaxed),
+            ScanEvent::DirDone { .. } if stop.load(Ordering::Relaxed) => done_after_stop += 1,
+            _ => {}
+        };
+        let started = std::time::Instant::now();
+        let outcome = scan_directory_with_coverage(
+            &dir,
+            &ScanConfig::default(),
+            &interrupt,
+            Some(&mut on_event),
+        );
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+        assert_eq!(done_after_stop, 0);
+        assert!(outcome.coverage.interrupted && outcome.coverage.has_gaps);
+        assert!(!outcome.coverage.complete);
+        assert!(!outcome.results.is_empty());
+        cleanup_test_dir(&dir);
+    }
+
     #[test]
     fn coverage_is_complete_for_plain_text_tree() {
         let dir = create_test_dir();
@@ -2884,6 +3580,30 @@ mod tests {
         assert_eq!(outcome.coverage.files_not_checked(), 0);
         assert!(outcome.coverage.gap_lines("").is_empty());
         cleanup_test_dir(&dir);
+    }
+
+    #[test]
+    fn code_folders_in_home_are_default_roots_once() {
+        let home = create_test_dir();
+        for d in ["Documents", "GitHub", "Developer", "code"] {
+            std::fs::create_dir_all(home.join(d)).unwrap();
+        }
+        let dirs = smart_scan_dirs_in(&home);
+        for d in ["GitHub", "Developer", "code"] {
+            let n = dirs
+                .iter()
+                .filter(|p| {
+                    std::fs::metadata(p).ok().map(|m| m.is_dir()) == Some(true)
+                        && same_dir_listed(&[home.join(d)], p)
+                })
+                .count();
+            assert_eq!(n, 1, "{d} should be a default root exactly once: {dirs:?}");
+        }
+        assert!(
+            !dirs.iter().any(|p| p.ends_with("Projects")),
+            "absent folders are not listed"
+        );
+        cleanup_test_dir(&home);
     }
 
     #[test]
