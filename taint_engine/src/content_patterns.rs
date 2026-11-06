@@ -1205,7 +1205,7 @@ fn check_credit_card(line: &str, line_number: usize, findings: &mut Vec<ContentF
 }
 
 /// Runs of 13 to 19 digits written as one number, optionally grouped by
-/// single spaces or dashes ("4111 1111 1111 1111"). A run that is part of a
+/// single spaces or dashes ("NNNN NNNN NNNN NNNN"). A run that is part of a
 /// decimal number (123.4567890123456), or glued to letters (an id or a
 /// hash), is not a card number.
 fn card_candidates(line: &str) -> Vec<String> {
