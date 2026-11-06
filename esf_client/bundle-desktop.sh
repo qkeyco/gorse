@@ -61,12 +61,12 @@ if [[ "$NOTARIZE" == 1 ]]; then
     [[ -z "${HEDGEHOG_NOTARY_KEYCHAIN:-}" ]] || NOTARY_AUTH+=(--keychain "$HEDGEHOG_NOTARY_KEYCHAIN")
 fi
 
-# Stapling fetches the ticket from Apple; a dropped connection there is not a
-# rejection, so try a few times before giving up.
+# Stapling and validating both fetch from Apple; a dropped connection there is
+# not a rejection, so try a few times before giving up.
 staple() {
     local attempt
     for attempt in 1 2 3 4 5; do
-        xcrun stapler staple "$1" && return 0
+        xcrun stapler staple "$1" && xcrun stapler validate "$1" && return 0
         echo "Stapling $1 failed (attempt $attempt); retrying in 20 s..." >&2
         sleep 20
     done
@@ -167,7 +167,6 @@ if [[ "$NOTARIZE" == 1 ]]; then
         echo "Notarization was not accepted; the app cannot ship." >&2; cat "$REPORT" >&2; exit 1
     fi
     staple "$APP"
-    xcrun stapler validate "$APP"
     spctl --assess --type execute --verbose=2 "$APP"
     zip_app
 fi
