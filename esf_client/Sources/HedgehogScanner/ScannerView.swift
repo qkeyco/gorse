@@ -345,6 +345,9 @@ private struct ResultsPane: View {
         let seconds = max(report.elapsed_secs, 1)
         var text = "\(report.findings.tally.summary(empty: "Nothing found")) in \(seconds)s"
         if report.interrupted { text += " (stopped early)" }
+        if let n = report.coverage?.notes_read {
+            text += n == 1 ? " · 1 Apple Note read" : " · \(n.formatted()) Apple Notes read"
+        }
         if let th = report.engines?.first(where: { $0.name == "trufflehog" }) {
             text += th.error == nil ? " · with TruffleHog \(th.version ?? "")" : " · TruffleHog failed"
         }

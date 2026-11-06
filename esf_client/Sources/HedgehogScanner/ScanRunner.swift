@@ -83,6 +83,8 @@ struct ScanCoverage: Codable, Hashable {
     /// app has no Full Disk Access). Absent from reports that did not try,
     /// and from scanners that do not report it; both mean "no banner".
     let notes_unreadable: Bool?
+    /// How many Apple Notes were read, when the scan read them this run.
+    var notes_read: Int? = nil
 }
 
 extension ScanCoverage {
@@ -115,7 +117,8 @@ extension ScanCoverage {
             images_seen: images_seen + o.images_seen,
             images_content_not_checked: images_content_not_checked + o.images_content_not_checked,
             image_ocr_cap_reached: image_ocr_cap_reached || o.image_ocr_cap_reached,
-            notes_unreadable: notes_unreadable == true || o.notes_unreadable == true ? true : (notes_unreadable ?? o.notes_unreadable)
+            notes_unreadable: notes_unreadable == true || o.notes_unreadable == true ? true : (notes_unreadable ?? o.notes_unreadable),
+            notes_read: notes_read == nil && o.notes_read == nil ? nil : (notes_read ?? 0) + (o.notes_read ?? 0)
         )
     }
 }
@@ -154,8 +157,11 @@ extension ScanReport {
         if c.files_skipped_by_type > 0 {
             notes.append("\(Self.items(c.files_skipped_by_type, "file", "files")) of a type this scanner cannot read, such as PDFs or archives, \(c.files_skipped_by_type == 1 ? "was" : "were") checked by name only.")
         }
+        if c.notes_read == 0 {
+            notes.append("No Apple Notes were found to read.")
+        }
         if c.images_content_not_checked > 0 {
-            notes.append("\(Self.items(c.images_content_not_checked, "picture was", "pictures were")) checked by file name only. This version does not read text inside pictures.")
+            notes.append("\(Self.items(c.images_content_not_checked, "picture was", "pictures were")) checked by file name only; the text inside them was not read.")
         }
         return notes
     }
@@ -209,7 +215,7 @@ extension ScanReport {
             reasons.append("\(items(c.files_skipped_by_type, "file is", "files are")) of a type this scanner cannot read, such as PDFs, archives or app data\(names(c.skipped_types)).")
         }
         if c.images_content_not_checked > 0 {
-            reasons.append("\(items(c.images_content_not_checked, "image was", "images were")) checked by file name only. This version does not read text inside pictures.")
+            reasons.append("\(items(c.images_content_not_checked, "image was", "images were")) checked by file name only; the text inside them was not read.")
         }
         if c.image_ocr_cap_reached {
             reasons.append("The limit on how many pictures can be read in one scan was reached.")

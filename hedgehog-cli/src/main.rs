@@ -2110,6 +2110,9 @@ fn cmd_deep_scan(
         // notes_unreadable is set when Notes could not be read (usually no
         // Full Disk Access); the Mac app then offers the privacy settings.
         let mut notes_unreadable = false;
+        // How many notes were read, when the Notes step ran this time; the
+        // app shows it so "nothing found" never hides "nothing read".
+        let mut notes_read: Option<usize> = None;
         let send_finding = |r: &content_scanner::ScanResult, total: usize| {
             if progress {
                 use std::io::Write;
@@ -2125,8 +2128,12 @@ fn cmd_deep_scan(
             if progress {
                 emit(serde_json::json!({"event": "phase", "name": "notes"}));
             }
-            let (apple_results, _, notes_err) = content_scanner::scan_apple_notes(&config);
+            let (apple_results, notes_count, notes_err) =
+                content_scanner::scan_apple_notes(&config);
             notes_unreadable = notes_err.is_some() || notes_folder_hidden();
+            if !notes_unreadable {
+                notes_read = Some(notes_count);
+            }
             for r in apple_results {
                 send_finding(&r, saved.findings.len() + all_results.len() + 1);
                 all_results.push(r);
@@ -2421,6 +2428,9 @@ fn cmd_deep_scan(
         let mut coverage_json = serde_json::to_value(&coverage).unwrap_or_default();
         if let Some(map) = coverage_json.as_object_mut() {
             map.insert("notes_unreadable".into(), notes_unreadable.into());
+            if let Some(n) = notes_read {
+                map.insert("notes_read".into(), n.into());
+            }
         }
         // Saved progress keeps every match; only the report folds repeats.
         let findings = if all_matches {

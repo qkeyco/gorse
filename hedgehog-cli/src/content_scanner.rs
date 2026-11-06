@@ -2214,6 +2214,15 @@ pub fn finding_category(result: &ScanResult) -> &'static str {
     cat
 }
 
+/// Every note with a body, whatever entity number this database gave notes.
+#[cfg(target_os = "macos")]
+const NOTES_QUERY: &str = "SELECT z1.ZSNIPPET, z2.ZDATA \
+     FROM ZICCLOUDSYNCINGOBJECT z1 \
+     JOIN ZICNOTEDATA z2 ON z1.Z_PK = z2.ZNOTE \
+     WHERE z1.Z_ENT IN (SELECT Z_ENT FROM Z_PRIMARYKEY WHERE Z_NAME = 'ICNote') \
+       AND IFNULL(z1.ZMARKEDFORDELETION, 0) != 1 \
+       AND z2.ZDATA IS NOT NULL";
+
 /// Scan Apple Notes on macOS. Notes are stored in a SQLite DB readable by
 /// any process. Reads the full note body from `ZICNOTEDATA.ZDATA` (gzip-
 /// compressed protobuf), decompresses it, extracts printable text, and
@@ -2261,17 +2270,13 @@ pub fn scan_apple_notes(_config: &ScanConfig) -> (Vec<ScanResult>, usize, Option
         }
     };
 
-    // Notes are Z_ENT=12 in the polymorphic ZICCLOUDSYNCINGOBJECT table.
+    // Notes are one entity in the polymorphic ZICCLOUDSYNCINGOBJECT table.
+    // Its Z_ENT number is assigned per database by Core Data (it was 12 on
+    // some Macs, not on others), so look it up by name. ZMARKEDFORDELETION
+    // is often NULL, and NULL != 1 is not true in SQL, so treat NULL as 0.
     // ZTITLE is NULL for notes — title is derived from the body text.
     // JOIN ZICNOTEDATA to get the compressed body (ZDATA).
-    let mut stmt = match conn.prepare(
-        "SELECT z1.ZSNIPPET, z2.ZDATA \
-         FROM ZICCLOUDSYNCINGOBJECT z1 \
-         JOIN ZICNOTEDATA z2 ON z1.Z_PK = z2.ZNOTE \
-         WHERE z1.Z_ENT = 12 \
-           AND z1.ZMARKEDFORDELETION != 1 \
-           AND z2.ZDATA IS NOT NULL",
-    ) {
+    let mut stmt = match conn.prepare(NOTES_QUERY) {
         Ok(s) => s,
         Err(e) => return (Vec::new(), 0, Some(format!("Notes query failed: {e}"))),
     };
@@ -3921,5 +3926,34 @@ mod tests {
 
         c.merge(d);
         assert!(c.has_gaps, "merging a root with a gap keeps the gap");
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod notes_query_tests {
+    use super::NOTES_QUERY;
+
+    /// A synthetic NoteStore: notes are entity 9 here, not 12, and two of
+    /// the three live notes have a NULL deletion flag.
+    #[test]
+    fn notes_are_found_whatever_their_entity_number_and_with_null_flags() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE Z_PRIMARYKEY (Z_ENT INTEGER, Z_NAME TEXT);
+             INSERT INTO Z_PRIMARYKEY VALUES (5, 'ICFolder'), (9, 'ICNote'), (12, 'ICAttachment');
+             CREATE TABLE ZICCLOUDSYNCINGOBJECT (Z_PK INTEGER, Z_ENT INTEGER, ZSNIPPET TEXT, ZMARKEDFORDELETION INTEGER);
+             INSERT INTO ZICCLOUDSYNCINGOBJECT VALUES
+               (1, 9, 'a', NULL), (2, 9, 'b', 0), (3, 9, 'c', NULL), (4, 9, 'gone', 1), (5, 12, 'attachment', NULL);
+             CREATE TABLE ZICNOTEDATA (ZNOTE INTEGER, ZDATA BLOB);
+             INSERT INTO ZICNOTEDATA VALUES (1, x'00'), (2, x'00'), (3, x'00'), (4, x'00'), (5, x'00');",
+        )
+        .unwrap();
+        let mut stmt = conn.prepare(NOTES_QUERY).unwrap();
+        let snippets: Vec<String> = stmt
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .flatten()
+            .collect();
+        assert_eq!(snippets, vec!["a", "b", "c"]);
     }
 }
