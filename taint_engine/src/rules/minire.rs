@@ -2,7 +2,7 @@
 // Copyright (c) 2026 QKey Co. Source-available, not open source; commercial use requires a licence. See NOTICE.md.
 //! A small backtracking regular-expression matcher, std only.
 //!
-//! It supports exactly the subset of Go/RE2 syntax the Gitleaks rules use:
+//! It supports exactly the subset of Go/RE2 syntax the Betterleaks rules use:
 //! literals; escapes (`\b \B \A \z \s \S \w \W \d \D \t \n \r \f \v`,
 //! `\xHH`, `\x{H..}`, escaped punctuation); character classes with ranges,
 //! negation, escapes and POSIX names (`[[:alnum:]]`); `.`; the quantifiers
@@ -784,7 +784,7 @@ fn width(node: &Node) -> (usize, Option<usize>) {
 /// A literal every match must contain, at a bounded distance from the match
 /// start: the first top-level item that is a finite set of non-empty literal
 /// strings and is preceded only by items of bounded width. Keyword-style
-/// Gitleaks rules (`[\w.-]{0,50}?(?:twitter)...`) start with a run that can
+/// Imported rules (`[\w.-]{0,50}?(?:twitter)...`) start with a run that can
 /// begin almost anywhere; searching for the keyword first and trying only
 /// starts within reach of it keeps them fast.
 #[derive(Debug)]

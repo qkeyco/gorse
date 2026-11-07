@@ -1,39 +1,44 @@
 // SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Copyright (c) 2026 QKey Co. Source-available, not open source; commercial use requires a licence. See NOTICE.md.
-//! Secret-detection rules imported from Gitleaks (MIT), run by Gorse's own
-//! dependency-free matcher.
+//! Secret-detection rules imported from Betterleaks (MIT, the Gitleaks
+//! author's successor rule set), run by Gorse's own dependency-free matcher.
 //!
-//! `gitleaks_generated.rs` is produced by `scripts/gitleaks-import.ts` from
-//! `third_party/gitleaks/gitleaks.toml`. Each line is scanned once by a
-//! keyword automaton ([`keywords`]); only rules whose keyword occurs in the
-//! lowercased line run their pattern ([`minire`]), as in Gitleaks. A match
-//! then passes the rule's entropy threshold and allowlists (the rule's own
-//! and Gitleaks' global one) before it becomes a [`ContentFinding`].
+//! `betterleaks_generated.rs` is produced by `scripts/betterleaks-import.ts`
+//! from `third_party/betterleaks/betterleaks.toml`. Each line is scanned once
+//! by a keyword automaton ([`keywords`]); only rules whose keyword occurs in
+//! the lowercased line run their pattern ([`minire`]), as upstream does. A
+//! match then passes the rule's entropy threshold, its token-ratio limit
+//! ([`tokens`]: text that splits into few, long word pieces reads like
+//! prose, not a key) and its allowlists (the parts of the upstream filter a
+//! line scan can evaluate) before it becomes a [`ContentFinding`].
 //!
 //! Secret text never leaves this module except as the four-character
 //! `redacted_preview` prefix.
 
 pub mod keywords;
 pub mod minire;
+pub(crate) mod tokens;
 
-mod gitleaks_generated;
+// Generated data, laid out by the importer rather than rustfmt.
+#[rustfmt::skip]
+mod betterleaks_generated;
 
+use std::collections::HashMap;
 use std::sync::OnceLock;
 
 use crate::content_patterns::{
     shannon_entropy, Confidence, ContentFinding, ContentSecretType, LineContext,
 };
-use gitleaks_generated::{GLOBAL_ALLOWLIST, RULES};
+use betterleaks_generated::{GLOBAL_ALLOWLISTS, RULES};
 use keywords::KeywordMatcher;
 use minire::Regex;
 
-/// Which text an allowlist regex is tested against (Gitleaks `regexTarget`).
-// The v8.30.1 import only has secret-targeted allowlists (the match and line
-// ones belong to excluded rules); the other targets stay for future imports.
+/// Which text an allowlist regex is tested against (the upstream filter's
+/// `finding["secret"]`, `finding["match"]` or `finding["line"]`).
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum AllowTarget {
-    /// The extracted secret (Gitleaks' default).
+    /// The extracted secret (the default).
     Secret,
     /// The whole regex match.
     Match,
@@ -41,9 +46,21 @@ pub(crate) enum AllowTarget {
     Line,
 }
 
-/// One Gitleaks allowlist reduced to what a line scan can evaluate: regexes
-/// on the secret, match or line, and stopwords contained in the secret. A
-/// finding is allowed when any regex matches or any stopword occurs.
+/// The upstream rule's own confidence (`confidence = "high" | "medium" |
+/// "low"`): how sure the rule is that a match is a credential of that service.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Rated {
+    High,
+    Medium,
+    /// Upstream's three low-confidence rules are all excluded today, so
+    /// nothing constructs this yet.
+    #[allow(dead_code)]
+    Low,
+}
+
+/// One upstream filter condition reduced to what a line scan can evaluate:
+/// regexes on the secret, match or line, and stopwords contained in the
+/// secret. A finding is allowed when any regex matches or any stopword occurs.
 #[derive(Debug)]
 pub(crate) struct GlAllowlist {
     pub target: AllowTarget,
@@ -54,10 +71,10 @@ pub(crate) struct GlAllowlist {
     pub hashes: &'static [&'static str],
 }
 
-/// One imported Gitleaks rule.
+/// One imported rule.
 #[derive(Debug)]
 pub(crate) struct GlRule {
-    /// Gitleaks rule id (read by tests and debugging only).
+    /// Upstream rule id (read by tests and debugging only).
     #[cfg_attr(not(test), allow(dead_code))]
     pub id: &'static str,
     /// Human name for `ContentSecretType::ApiKey { service }`.
@@ -66,11 +83,21 @@ pub(crate) struct GlRule {
     pub regex: &'static str,
     /// Lowercase keywords; the rule runs only when one occurs in the line.
     pub keywords: &'static [&'static str],
-    /// Minimum Shannon entropy of the secret (exclusive), if any.
+    /// Entropy floor of the secret, if any: a secret below it is discarded.
     pub entropy: Option<f64>,
+    /// Upstream wrote `entropy <= N`: a secret exactly at the floor is
+    /// discarded too.
+    pub entropy_inclusive: bool,
+    /// The pattern finds the key by the words around it (`service … = value`),
+    /// not by a prefix of the key itself; such a rule is never Definitive.
+    pub contextual: bool,
+    /// Discard a secret whose bytes-per-token ratio under cl100k_base is
+    /// this or more (upstream `tokenRatio(secret) >= N`), if any.
+    pub token_ratio: Option<f64>,
     /// None: the first non-empty capture group, else the whole match
-    /// (Gitleaks' default). Some(0): the whole match. Some(n): group n.
+    /// (the upstream default). Some(0): the whole match. Some(n): group n.
     pub secret_group: Option<u8>,
+    pub rated: Rated,
     pub allowlists: &'static [GlAllowlist],
 }
 
@@ -90,7 +117,8 @@ struct CompiledRule {
 struct Compiled {
     rules: Vec<CompiledRule>,
     keywords: KeywordMatcher,
-    global: CompiledAllow,
+    /// Upstream's root-level filter plus Gorse's own, applied to every rule.
+    global: Vec<CompiledAllow>,
 }
 
 fn compile_allow(a: &GlAllowlist) -> CompiledAllow {
@@ -121,14 +149,20 @@ const CONFIDENCE_OVERRIDES: &[(&str, Confidence)] = &[
     ("aws-access-token", Confidence::Definitive),
 ];
 
-fn rule_confidence(id: &str, literal_prefix: usize) -> Confidence {
+/// A fixed key prefix of four or more characters (`ghp_`, a payment
+/// provider's live-key prefix) names the service on its own, so a
+/// high-confidence upstream rule for a key with one is Definitive; any other
+/// high- or medium-confidence rule is High (a named service's key, found by
+/// shape or by context). Low-confidence upstream rules depend on context
+/// whatever they match.
+fn rule_confidence(id: &str, literal_prefix: usize, contextual: bool, rated: Rated) -> Confidence {
     if let Some((_, c)) = CONFIDENCE_OVERRIDES.iter().find(|(r, _)| *r == id) {
         return *c;
     }
-    if literal_prefix >= 4 {
-        Confidence::Definitive
-    } else {
-        Confidence::High
+    match rated {
+        Rated::High if literal_prefix >= 4 && !contextual => Confidence::Definitive,
+        Rated::High | Rated::Medium => Confidence::High,
+        Rated::Low => Confidence::ContextDependent,
     }
 }
 
@@ -142,7 +176,7 @@ fn compiled() -> &'static Compiled {
                 let prefix = regex.as_ref().map_or(0, |re| re.literal_prefix_len());
                 CompiledRule {
                     regex,
-                    confidence: rule_confidence(r.id, prefix),
+                    confidence: rule_confidence(r.id, prefix, r.contextual, r.rated),
                     allowlists: r.allowlists.iter().map(compile_allow).collect(),
                 }
             })
@@ -156,19 +190,19 @@ fn compiled() -> &'static Compiled {
         Compiled {
             rules,
             keywords,
-            global: compile_allow(&GLOBAL_ALLOWLIST),
+            global: GLOBAL_ALLOWLISTS.iter().map(compile_allow).collect(),
         }
     })
 }
 
-/// Number of imported Gitleaks rules.
-pub fn gitleaks_rule_count() -> usize {
+/// Number of imported rules.
+pub fn imported_rule_count() -> usize {
     RULES.len()
 }
 
-/// Gitleaks release the rules were imported from.
-pub fn gitleaks_source_version() -> &'static str {
-    gitleaks_generated::SOURCE_VERSION
+/// Betterleaks release the rules were imported from.
+pub fn imported_source_version() -> &'static str {
+    betterleaks_generated::SOURCE_VERSION
 }
 
 fn allowed(a: &CompiledAllow, secret: &str, matched: &str, line: &str) -> bool {
@@ -204,7 +238,7 @@ fn redact(secret: &str) -> String {
 
 /// Room for every generated rule; a test checks the table fits.
 #[cfg(test)]
-const MAX_RULES: usize = 256;
+const MAX_RULES: usize = 512;
 
 /// How far before the end of a keyword, and after it, a rule looks. The
 /// keyword-style rules allow 50 name characters before the keyword and an
@@ -254,18 +288,18 @@ fn ceil_boundary(s: &str, mut i: usize) -> usize {
     i
 }
 
-/// Runs the imported Gitleaks rules on one line. A secret span two rules
-/// both match is reported once, by the first rule.
-pub fn check_line_gitleaks(line: &str, line_number: usize) -> Vec<ContentFinding> {
-    check_line_gitleaks_spans(line, line_number)
+/// Runs the imported rules on one line. A secret span two rules both match
+/// is reported once, by the first rule.
+pub fn check_line_imported(line: &str, line_number: usize) -> Vec<ContentFinding> {
+    check_line_imported_spans(line, line_number)
         .into_iter()
         .map(|(f, _)| f)
         .collect()
 }
 
-/// `check_line_gitleaks`, with each finding's secret as a byte span of the
+/// `check_line_imported`, with each finding's secret as a byte span of the
 /// line (so callers can tell the same key from a second one).
-pub(crate) fn check_line_gitleaks_spans(
+pub(crate) fn check_line_imported_spans(
     line: &str,
     line_number: usize,
 ) -> Vec<(ContentFinding, (usize, usize))> {
@@ -287,7 +321,10 @@ pub(crate) fn check_line_gitleaks_spans(
     }
     hits.sort_unstable();
     let bytes = line.as_bytes();
-    let mut reported: Vec<(usize, usize)> = Vec::new();
+    // Each reported span, with the finding's index and whether its rule's
+    // keyword sits inside the secret. A map, so a line with thousands of
+    // matches costs one lookup per match rather than a scan of all before.
+    let mut by_span: HashMap<(usize, usize), (usize, bool)> = HashMap::new();
     // One step budget for the whole line, shared by every rule and window.
     let mut budget =
         LINE_BUDGET_BASE.saturating_add(LINE_BUDGET_PER_BYTE.saturating_mul(line.len()));
@@ -377,41 +414,105 @@ pub(crate) fn check_line_gitleaks_spans(
                     continue;
                 }
                 if let Some(min) = rule.entropy {
-                    if shannon_entropy(secret) <= min {
+                    let entropy = shannon_entropy(secret);
+                    if entropy < min || (rule.entropy_inclusive && entropy == min) {
+                        continue;
+                    }
+                }
+                if let Some(max) = rule.token_ratio {
+                    if tokens::token_ratio(secret).is_some_and(|ratio| ratio >= max) {
                         continue;
                     }
                 }
                 let abs = (ws + ss, ws + se);
-                if reported.contains(&abs) {
+                if fragment_of_longer_run(line, abs) || snake_case_identifier(secret) {
                     continue;
                 }
                 let matched = &text[ms..me];
                 if compiled_rule
                     .allowlists
                     .iter()
-                    .chain(std::iter::once(&c.global))
+                    .chain(c.global.iter())
                     .any(|a| allowed(a, secret, matched, line))
                 {
                     continue;
                 }
-                reported.push(abs);
-                findings.push((
-                    ContentFinding {
-                        secret_type: ContentSecretType::ApiKey {
-                            service: rule.service,
-                        },
-                        confidence: compiled_rule.confidence,
-                        context: LineContext::Code,
-                        line_number,
-                        redacted_preview: redact(secret),
-                        description: rule.description,
+                let finding = ContentFinding {
+                    secret_type: ContentSecretType::ApiKey {
+                        service: rule.service,
                     },
-                    abs,
-                ));
+                    confidence: compiled_rule.confidence,
+                    context: LineContext::Code,
+                    line_number,
+                    redacted_preview: redact(secret),
+                    description: rule.description,
+                };
+                // Two rules on one span (a curl header rule and a service
+                // rule on the same token): one finding, under the more
+                // confident name (`Confidence` orders Definitive first) and,
+                // at equal confidence, the rule that names the key by its own
+                // shape (its keyword is inside the secret) over one that
+                // names it by the context around it.
+                let lower = secret.to_ascii_lowercase();
+                let named_by_shape = rule.keywords.iter().any(|k| lower.contains(k));
+                if let Some((pos, shape_named)) = by_span.get_mut(&abs) {
+                    let existing = &mut findings[*pos].0;
+                    let better = finding.confidence < existing.confidence
+                        || (finding.confidence == existing.confidence
+                            && named_by_shape
+                            && !*shape_named);
+                    if better {
+                        *existing = finding;
+                        *shape_named = named_by_shape;
+                    }
+                    continue;
+                }
+                by_span.insert(abs, (findings.len(), named_by_shape));
+                findings.push((finding, abs));
             }
         }
     }
     findings
+}
+
+/// Whether the secret at `span` (byte offsets into `line`) sits inside a
+/// longer run of base64-alphabet characters that continues past it on
+/// both sides by 32 characters or more in total. Such a match is a slice
+/// of an encoded image, hash or blob (`data:image/png;base64,…`), where a
+/// `+` or `/` happens to make a word boundary before a rule's prefix, not
+/// a key of its own. A key at the end of `KEY=`, inside quotes, or in a
+/// URL query is bounded on at least one side and is kept.
+fn fragment_of_longer_run(line: &str, (s, e): (usize, usize)) -> bool {
+    let b = line.as_bytes();
+    let run = |c: u8| c.is_ascii_alphanumeric() || matches!(c, b'+' | b'/' | b'=' | b'_' | b'-');
+    let mut a = s;
+    while a > 0 && run(b[a - 1]) {
+        a -= 1;
+    }
+    let mut z = e;
+    while z < b.len() && run(b[z]) {
+        z += 1;
+    }
+    a < s && z > e && (z - a) - (e - s) >= 32
+}
+
+/// Whether a secret is a `snake_case` identifier: three or more
+/// underscore-separated words of letters only, none longer than twelve,
+/// and no digit anywhere (`lip_sync_offset_frames`). A rule whose secret
+/// alphabet admits `_` otherwise matches variable names; a real token has
+/// digits, or a single run of letters far longer than any word.
+fn snake_case_identifier(secret: &str) -> bool {
+    if secret.bytes().any(|b| b.is_ascii_digit()) {
+        return false;
+    }
+    let mut words = 0;
+    for part in secret.split('_') {
+        if part.is_empty() || part.len() > 12 || !part.bytes().all(|b| b.is_ascii_alphabetic()) {
+            return false;
+        }
+        words += 1;
+    }
+    words >= 3
 }
 
 #[cfg(test)]
@@ -528,7 +629,7 @@ mod long_line_tests {
                 .collect::<String>();
         let line = format!("{filler} const T=\"{token}\"; {filler}");
         let start = std::time::Instant::now();
-        let found = check_line_gitleaks(&line, 1);
+        let found = check_line_imported(&line, 1);
         let took = start.elapsed();
         assert!(took < std::time::Duration::from_secs(2), "took {took:?}");
         assert!(

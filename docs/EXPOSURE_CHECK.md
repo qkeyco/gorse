@@ -20,9 +20,12 @@ hedgehog exposure --mark-production NAME   # record a host or system as producti
 ```
 
 The deep scan (`hedgehog scan --deep`) does all of its detection itself:
-Gorse's own rules and a converted copy of the open-source Gitleaks rule set
+Gorse's own rules and a converted copy of the open-source Betterleaks rule set
 (MIT licence, credited in LICENSE-THIRD-PARTY) run in one pass on Gorse's own
-matcher. Nothing is downloaded and no other program runs, so the promise that
+matcher; the Betterleaks rules' token-ratio filter, which drops candidates that
+read like prose rather than key material, is evaluated with an embedded copy of
+the cl100k_base word-piece vocabulary (MIT, data only; `taint_engine/src/rules/tokens.rs`).
+Nothing is downloaded and no other program runs, so the promise that
 the scan sends nothing anywhere holds; a finding carries the rule's category
 and never the raw secret.
 

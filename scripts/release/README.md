@@ -73,7 +73,7 @@ and the report connects the dots between them.
 Pictures for API keys, passwords, private keys, seed phrases and sensitivity
 labels, including the text inside screenshots. Add `--all-dirs` for the whole
 home folder (Pro). Detection runs inside Gorse: its own rules plus a
-converted copy of the open-source Gitleaks rule set (MIT licence, credited in
+converted copy of the open-source Betterleaks rule set (MIT licence, credited in
 LICENSE-THIRD-PARTY) run in one pass, and nothing is downloaded.
 
 ## What the check sees, and what it does not

@@ -32,8 +32,10 @@ Third-party components keep their own licences, listed in
 [LICENSE-THIRD-PARTY](LICENSE-THIRD-PARTY). These include:
 
 - the Destructive Command Guard rule set, under the MIT licence;
-- the Gitleaks secret-detection rule set, under the MIT licence, converted to
-  run on Gorse's own matcher (the Gitleaks program itself is not included).
+- the Betterleaks secret-detection rule set, under the MIT licence, converted to
+  run on Gorse's own matcher (the Betterleaks program itself is not included);
+- the cl100k_base word-piece vocabulary from tiktoken, under the MIT licence,
+  as data only (Gorse counts tokens with its own code).
 
 ## Patents
 

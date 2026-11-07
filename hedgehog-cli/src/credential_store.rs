@@ -240,11 +240,13 @@ pub fn explain_signature_failure(error: String) -> String {
     }
 }
 
+/// Pro keys work wherever Gorse can bind a lease to the machine and keep it
+/// in a private file: macOS, Linux and Windows.
 pub fn require_runtime_support() -> Result<(), String> {
-    if cfg!(target_os = "macos") {
+    if cfg!(any(target_os = "macos", target_os = "linux", windows)) {
         Ok(())
     } else {
-        Err("Gorse Pro runs on macOS for now; Windows and Linux are coming. The free exposure check and Deep Scan work in full here. A Pro key works on a Mac, or ask support@gorse.is for a refund.".into())
+        Err("Gorse Pro is not available on this platform. The free exposure check and Deep Scan work in full here.".into())
     }
 }
 
@@ -292,10 +294,101 @@ pub fn machine_id() -> Result<String, String> {
         }
         return Ok(fingerprint("linux", identity));
     }
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    #[cfg(windows)]
+    {
+        return windows_identity().map(|identity| fingerprint("windows", &identity));
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
     {
         Err("Paid runtime leases are not qualified on this platform".into())
     }
+}
+
+/// The installation's MachineGuid, written by Windows setup and readable by
+/// every user. Read straight from the registry, so no other program's output
+/// is trusted; the 64-bit view is named so a 32-bit build sees the same value.
+#[cfg(windows)]
+fn windows_identity() -> Result<String, String> {
+    use std::ffi::c_void;
+    #[link(name = "advapi32")]
+    unsafe extern "system" {
+        fn RegOpenKeyExW(
+            key: *mut c_void,
+            sub_key: *const u16,
+            options: u32,
+            desired: u32,
+            result: *mut *mut c_void,
+        ) -> i32;
+        fn RegQueryValueExW(
+            key: *mut c_void,
+            name: *const u16,
+            reserved: *mut u32,
+            kind: *mut u32,
+            data: *mut u8,
+            size: *mut u32,
+        ) -> i32;
+        fn RegCloseKey(key: *mut c_void) -> i32;
+    }
+    // HKEY_LOCAL_MACHINE is a sign-extended 0x80000002.
+    const HKEY_LOCAL_MACHINE: isize = -2_147_483_646;
+    const KEY_QUERY_VALUE: u32 = 0x0001;
+    const KEY_WOW64_64KEY: u32 = 0x0100;
+    const REG_SZ: u32 = 1;
+    fn wide(text: &str) -> Vec<u16> {
+        text.encode_utf16().chain(std::iter::once(0)).collect()
+    }
+    let sub_key = wide(r"SOFTWARE\Microsoft\Cryptography");
+    let name = wide("MachineGuid");
+    let mut key: *mut c_void = std::ptr::null_mut();
+    let opened = unsafe {
+        RegOpenKeyExW(
+            HKEY_LOCAL_MACHINE as *mut c_void,
+            sub_key.as_ptr(),
+            0,
+            KEY_QUERY_VALUE | KEY_WOW64_64KEY,
+            &mut key,
+        )
+    };
+    if opened != 0 || key.is_null() {
+        return Err("Machine identity is unavailable".into());
+    }
+    let mut kind = 0u32;
+    let mut buffer = [0u8; 256];
+    let mut size = buffer.len() as u32;
+    let queried = unsafe {
+        RegQueryValueExW(
+            key,
+            name.as_ptr(),
+            std::ptr::null_mut(),
+            &mut kind,
+            buffer.as_mut_ptr(),
+            &mut size,
+        )
+    };
+    unsafe { RegCloseKey(key) };
+    let size = size as usize;
+    if queried != 0 || kind != REG_SZ || size > buffer.len() || size % 2 != 0 {
+        return Err("Machine identity is unavailable".into());
+    }
+    let units: Vec<u16> = buffer[..size]
+        .chunks_exact(2)
+        .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+        .collect();
+    let identity = String::from_utf16(&units).map_err(|_| "Invalid machine identity")?;
+    let identity = identity.trim_end_matches('\0').trim();
+    // A GUID: 8-4-4-4-12 hex digits.
+    let guid_shaped = identity.len() == 36
+        && identity.bytes().enumerate().all(|(i, b)| {
+            if matches!(i, 8 | 13 | 18 | 23) {
+                b == b'-'
+            } else {
+                b.is_ascii_hexdigit()
+            }
+        });
+    if !guid_shaped {
+        return Err("Invalid machine identity".into());
+    }
+    Ok(identity.to_string())
 }
 
 #[cfg(target_os = "macos")]
@@ -505,7 +598,140 @@ fn read_license_file(path: &Path) -> Result<Option<String>, String> {
     let key = String::from_utf8(bytes).map_err(|_| "License file is not valid text")?;
     Ok(Some(key.trim().to_string()))
 }
-#[cfg(not(unix))]
+/// Reparse points (symbolic links, junctions, mount points) are refused
+/// everywhere in the licence path on Windows.
+#[cfg(windows)]
+const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
+/// Opens the link itself rather than what it points at, so a planted link is
+/// seen for what it is.
+#[cfg(windows)]
+const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+
+/// The licence lives in `%APPDATA%\hedgehog`, inside the user's own roaming
+/// profile. Windows gives that profile to the user, administrators and the
+/// system only, and the folder inherits it; no explicit permissions are set,
+/// so the checks here are that nothing on the path is a link and that the
+/// state folder is an ordinary directory.
+///
+/// The checks are made by path and the file is then opened by path, so a
+/// junction swapped onto the folder between the two would redirect the
+/// open; the Unix version works relative to a directory descriptor and has
+/// no such window. Only the same user can plant that junction, and that
+/// user can already read and replace their own lease, which is signed and
+/// machine-bound, so the window is accepted here rather than closed with
+/// directory-relative handles.
+#[cfg(windows)]
+fn private_directory(path: &Path, create: bool) -> Result<PathBuf, String> {
+    use std::os::windows::fs::MetadataExt;
+    let parent = path.parent().ok_or("License storage has no parent")?;
+    let home = parent.parent().ok_or("License storage has no home")?;
+    let home_metadata =
+        std::fs::symlink_metadata(home).map_err(|_| "License home is unavailable")?;
+    if !home_metadata.is_dir()
+        || home_metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+    {
+        return Err("License home changed or cannot be opened safely".into());
+    }
+    if create {
+        match std::fs::create_dir(parent) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(_) => return Err("Cannot create private license directory".into()),
+        }
+    }
+    let metadata = std::fs::symlink_metadata(parent)
+        .map_err(|_| "License directory is missing or cannot be opened safely")?;
+    if !metadata.is_dir() || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        return Err("License directory must be an ordinary folder, not a link".into());
+    }
+    Ok(parent.to_path_buf())
+}
+
+#[cfg(windows)]
+fn read_license_file(path: &Path) -> Result<Option<String>, String> {
+    use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
+    // Absence is not an error, but broken links or unsafe existing files are.
+    match std::fs::symlink_metadata(path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => return Err("Cannot inspect license file".into()),
+        _ => {}
+    }
+    private_directory(path, false)?;
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)
+        .map_err(|_| "Cannot open license file safely")?;
+    let before = file.metadata().map_err(|_| "Cannot inspect license file")?;
+    if !before.is_file()
+        || before.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+        || before.len() > MAX_KEY_BYTES as u64
+        || link_count(&file)? != 1
+    {
+        return Err("License file must be an ordinary private file, not a link".into());
+    }
+    let mut bytes = Vec::new();
+    (&file)
+        .take(MAX_KEY_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| "Cannot read license file")?;
+    let after = file.metadata().map_err(|_| "Cannot recheck license file")?;
+    if bytes.len() > MAX_KEY_BYTES
+        || before.len() != after.len()
+        || before.file_attributes() != after.file_attributes()
+        || before.creation_time() != after.creation_time()
+        || before.last_write_time() != after.last_write_time()
+    {
+        return Err("License file changed during its read".into());
+    }
+    let key = String::from_utf8(bytes).map_err(|_| "License file is not valid text")?;
+    Ok(Some(key.trim().to_string()))
+}
+/// How many directory entries name the open file. A hard link to a file
+/// outside the state folder has no reparse-point attribute, so only the
+/// link count tells it from an ordinary private file; Unix checks `nlink`
+/// the same way.
+#[cfg(windows)]
+fn link_count(file: &std::fs::File) -> Result<u32, String> {
+    use std::ffi::c_void;
+    use std::os::windows::io::AsRawHandle;
+    #[repr(C)]
+    struct FileTime {
+        low: u32,
+        high: u32,
+    }
+    // BY_HANDLE_FILE_INFORMATION, field for field.
+    #[repr(C)]
+    struct ByHandleFileInformation {
+        attributes: u32,
+        creation: FileTime,
+        last_access: FileTime,
+        last_write: FileTime,
+        volume_serial: u32,
+        size_high: u32,
+        size_low: u32,
+        links: u32,
+        index_high: u32,
+        index_low: u32,
+    }
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GetFileInformationByHandle(
+            handle: *mut c_void,
+            info: *mut ByHandleFileInformation,
+        ) -> i32;
+    }
+    let mut info = std::mem::MaybeUninit::<ByHandleFileInformation>::zeroed();
+    let ok = unsafe {
+        GetFileInformationByHandle(file.as_raw_handle() as *mut c_void, info.as_mut_ptr())
+    };
+    if ok == 0 {
+        return Err("Cannot inspect license file".into());
+    }
+    Ok(unsafe { info.assume_init() }.links)
+}
+
+#[cfg(not(any(unix, windows)))]
 fn read_license_file(_path: &Path) -> Result<Option<String>, String> {
     Err("Private lease storage is not qualified on this platform".into())
 }
@@ -559,7 +785,37 @@ fn store_license_file(path: &Path, key: &str) -> Result<(), String> {
     }
     result
 }
-#[cfg(not(unix))]
+/// Written to a fresh temporary file in the same folder and renamed into
+/// place, so a reader sees the old key or the new one, never a partial file.
+#[cfg(windows)]
+fn store_license_file(path: &Path, key: &str) -> Result<(), String> {
+    if key.len() > MAX_KEY_BYTES {
+        return Err("License exceeds size limit".into());
+    }
+    let directory = private_directory(path, true)?;
+    if std::fs::symlink_metadata(path).is_ok() {
+        // An unsafe existing file is refused rather than replaced.
+        read_license_file(path)?;
+    }
+    let temporary = directory.join(format!(".license-{:032x}", rand::random::<u128>()));
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temporary)
+        .map_err(|_| "Cannot create private license file")?;
+    let result = (|| {
+        file.write_all(key.as_bytes())
+            .map_err(|_| "Cannot write license file")?;
+        file.sync_all().map_err(|_| "Cannot sync license file")?;
+        drop(file);
+        std::fs::rename(&temporary, path).map_err(|_| "Cannot replace license file".to_string())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    result
+}
+#[cfg(not(any(unix, windows)))]
 fn store_license_file(_path: &Path, _key: &str) -> Result<(), String> {
     Err("Private lease storage is not qualified on this platform".into())
 }
@@ -601,7 +857,31 @@ fn license_lock(path: &Path) -> Result<std::fs::File, String> {
         .map_err(|_| "A license update is already running; retry shortly")?;
     Ok(file)
 }
-#[cfg(not(unix))]
+#[cfg(windows)]
+fn license_lock(path: &Path) -> Result<std::fs::File, String> {
+    use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
+    let directory = private_directory(path, true)?;
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(directory.join(".license.lock"))
+        .map_err(|_| "Cannot open private license lock")?;
+    let meta = file.metadata().map_err(|_| "Cannot inspect license lock")?;
+    if !meta.is_file()
+        || meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+        || link_count(&file)? != 1
+    {
+        return Err("License lock is not an ordinary private file".into());
+    }
+    // Waits out a lock briefly kept alive by a concurrent spawn (see the helper).
+    crate::encrypted_store::try_lock_briefly(&file)
+        .map_err(|_| "A license update is already running; retry shortly")?;
+    Ok(file)
+}
+#[cfg(not(any(unix, windows)))]
 fn license_lock(_path: &Path) -> Result<std::fs::File, String> {
     Err("Private lease storage is not qualified on this platform".into())
 }
@@ -641,7 +921,12 @@ fn delete_license_file(path: &Path) -> Result<(), String> {
         let _ = directory.sync_all();
         Ok(())
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        // read_license_file above has already refused a link in its place.
+        std::fs::remove_file(path).map_err(|_| "Cannot remove stored license".into())
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         Err("Private lease storage is not qualified on this platform".into())
     }
@@ -1324,9 +1609,7 @@ mod tests {
         assert_ne!(fingerprint("macos", "a-b"), fingerprint("linux", "a-b"));
         assert_eq!(fingerprint("macos", "a-b").len(), 64);
     }
-    #[cfg(unix)]
     struct Fixture(PathBuf);
-    #[cfg(unix)]
     impl Fixture {
         fn new() -> Self {
             let home = std::env::temp_dir().join(format!(
@@ -1340,16 +1623,13 @@ mod tests {
             self.0.join(".hedgehog/license.key")
         }
     }
-    #[cfg(unix)]
     impl Drop for Fixture {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
     }
     #[test]
-    #[cfg(unix)]
     fn private_atomic_storage_and_locking() {
-        use std::os::unix::fs::MetadataExt;
         let fixture = Fixture::new();
         let path = fixture.path();
         assert!(read_license_file(&path).unwrap().is_none());
@@ -1361,11 +1641,60 @@ mod tests {
             read_license_file(&path).unwrap().as_deref(),
             Some("synthetic-second")
         );
-        assert_eq!(std::fs::metadata(&path).unwrap().mode() & 0o777, 0o600);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            assert_eq!(std::fs::metadata(&path).unwrap().mode() & 0o777, 0o600);
+        }
         drop(lock);
         assert!(license_lock(&path).is_ok());
         delete_license_file(&path).unwrap();
         assert!(read_license_file(&path).unwrap().is_none());
+        // No temporary file is left behind by the two writes.
+        let leftovers: Vec<_> = std::fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().starts_with(".license-"))
+            .collect();
+        assert!(leftovers.is_empty(), "temporary files left: {leftovers:?}");
+    }
+    #[test]
+    #[cfg(windows)]
+    fn refuses_links_and_oversized_files_on_windows() {
+        use std::os::windows::fs::{symlink_dir, symlink_file};
+        let fixture = Fixture::new();
+        let path = fixture.path();
+        store_license_file(&path, "synthetic-original").unwrap();
+        // Over the size limit: refused on read, never replaced.
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .write_all(&vec![b'x'; MAX_KEY_BYTES])
+            .unwrap();
+        assert!(read_license_file(&path).is_err());
+        assert!(store_license_file(&path, "replacement").is_err());
+        std::fs::remove_file(&path).unwrap();
+        // Links need a privilege the test runner may lack; when they can be
+        // made, both a linked file and a linked state folder are refused.
+        let target = fixture.0.join("elsewhere.key");
+        std::fs::write(&target, "synthetic-elsewhere").unwrap();
+        if symlink_file(&target, &path).is_ok() {
+            assert!(read_license_file(&path).is_err());
+            assert!(store_license_file(&path, "replacement").is_err());
+            assert_eq!(
+                std::fs::read_to_string(&target).unwrap(),
+                "synthetic-elsewhere"
+            );
+            std::fs::remove_file(&path).unwrap();
+        }
+        let other = Fixture::new();
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+        if symlink_dir(&other.0, path.parent().unwrap()).is_ok() {
+            assert!(store_license_file(&path, "value").is_err());
+            assert!(license_lock(&path).is_err());
+            assert!(std::fs::read_dir(&other.0).unwrap().next().is_none());
+        }
     }
     #[test]
     #[cfg(unix)]

@@ -1,6 +1,6 @@
 [package]
 name = "hedgehog-desktop"
-version = "0.4.27"
+version = "0.4.28"
 edition = "2021"
 license = "LicenseRef-PolyForm-Noncommercial-1.0.0"
 description = "Gorse for Windows and Linux: the exposure check in a window, around the gorse command-line tool"

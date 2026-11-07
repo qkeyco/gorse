@@ -45,21 +45,60 @@ SOFTWARE.
 
 ------------------------------------------------------------------------------
 
-Gitleaks secret-detection rules
-Source: https://github.com/gitleaks/gitleaks (config/gitleaks.toml)
-Authors: Zachary Rice and the Gitleaks contributors
+Betterleaks secret-detection rules
+Source: https://github.com/betterleaks/betterleaks (config/betterleaks.toml)
+Authors: Zachary Rice and the Betterleaks contributors
 Licence: MIT
 
 Gorse's content scanner includes secret-detection rules (patterns, keywords,
-entropy thresholds and allowlists) converted from the Gitleaks default
-configuration, version v8.30.1 (commit 5f6ec56c), taken on 2026-11-06
+entropy thresholds and filter lists) converted from the Betterleaks default
+configuration, version v1.10.0 (commit 8d77e171), taken on 2026-11-07
 and used under the MIT License reproduced below. Gorse runs the rules with its
-own matcher; it does not bundle the Gitleaks program.
+own matcher; it does not bundle the Betterleaks program and never runs the
+rules' validation programs.
 
 --- LICENSE ---
 MIT License
 
 Copyright (c) 2019 Zachary Rice
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+------------------------------------------------------------------------------
+
+cl100k_base byte-pair vocabulary (tiktoken)
+Source: https://github.com/openai/tiktoken (the cl100k_base rank file at
+https://openaipublic.blob.core.windows.net/encodings/cl100k_base.tiktoken)
+Authors: OpenAI, Shantanu Jain
+Licence: MIT
+
+Gorse's content scanner embeds the cl100k_base vocabulary (100,256 byte
+strings; source file SHA-256
+223921b76ee99bde995b7ff738513eef100fb51d18c93597a113bcffe865b2a7, taken on
+7 November 2026) to tell readable text from random key material, which is how
+the Betterleaks rules' token-ratio filter is evaluated. Gorse counts tokens
+with its own code; it does not bundle tiktoken and never sends text anywhere.
+
+--- LICENSE ---
+MIT License
+
+Copyright (c) 2022 OpenAI, Shantanu Jain
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal

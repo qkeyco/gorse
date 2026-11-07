@@ -24,7 +24,37 @@ impl TestHome {
         for directory in ["home", "state", "tmp"] {
             fs::create_dir(root.join(directory)).unwrap();
         }
+        // A Windows profile has its AppData folders before Gorse ever runs; the
+        // licence code treats a missing profile folder as an error, not
+        // something to make.
+        if cfg!(windows) {
+            for directory in ["home/AppData/Roaming", "home/AppData/Local"] {
+                fs::create_dir_all(root.join(directory)).unwrap();
+            }
+        }
         Self { root }
+    }
+
+    /// Nothing was written to the fake home: it holds only what a real
+    /// profile has before Gorse runs (on Windows, the empty AppData folders).
+    fn assert_home_untouched(&self) {
+        let home = self.root.join("home");
+        let entries: Vec<String> = fs::read_dir(&home)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| !(cfg!(windows) && name == "AppData"))
+            .collect();
+        assert!(entries.is_empty(), "home was written to: {entries:?}");
+        if cfg!(windows) {
+            // The profile folders themselves must still be empty.
+            for sub in ["AppData/Roaming", "AppData/Local"] {
+                let written: Vec<String> = fs::read_dir(home.join(sub))
+                    .unwrap()
+                    .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+                    .collect();
+                assert!(written.is_empty(), "{sub} was written to: {written:?}");
+            }
+        }
     }
 
     fn command(&self) -> Command {
@@ -662,7 +692,7 @@ fn canary_selftest_rejects_overridden_sensor_evidence_without_mutating_state() {
         .as_str()
         .unwrap()
         .contains("HEDGEHOG_STATE_DIR"));
-    assert_eq!(fs::read_dir(home.root.join("home")).unwrap().count(), 0);
+    home.assert_home_untouched();
     assert_eq!(fs::read_dir(home.root.join("tmp")).unwrap().count(), 0);
 }
 
@@ -681,7 +711,7 @@ fn canary_selftest_unconfigured_machine_fails_before_registration_or_delivery() 
     assert_eq!(report["sensor_observed"], false);
     assert_eq!(report["delivery_provider_accepted"], false);
     assert_eq!(report["cleanup_complete"], true);
-    assert_eq!(fs::read_dir(home.root.join("home")).unwrap().count(), 0);
+    home.assert_home_untouched();
     assert_eq!(fs::read_dir(home.root.join("tmp")).unwrap().count(), 0);
     #[cfg(target_os = "macos")]
     assert_eq!(report["checks"][1]["name"], "configured alert channels");
@@ -705,7 +735,7 @@ fn canary_selftest_requires_explicit_mode_and_bounded_timeout() {
         assert_eq!(output.status.code(), Some(2), "{args:?}: {output:?}");
         assert!(output.stdout.is_empty());
     }
-    assert_eq!(fs::read_dir(home.root.join("home")).unwrap().count(), 0);
+    home.assert_home_untouched();
     assert_eq!(fs::read_dir(home.root.join("tmp")).unwrap().count(), 0);
 }
 
@@ -3175,11 +3205,11 @@ fn license_refresh_honours_loopback_api_origin_and_sends_nothing_without_a_lease
         .unwrap_or_else(|error| panic!("invalid JSON: {error}; output: {output:?}"));
     let error = report["error"].as_str().unwrap_or_default();
     assert!(
-        error.contains("No stored lease") || error.contains("Gorse Pro runs on macOS for now"),
+        error.contains("No stored lease") || error.contains("achine identity"),
         "unexpected error: {error}"
     );
-    // macOS reports a missing lease; other platforms report that the paid
-    // runtime is unavailable before they ever look for one.
+    // A missing lease, or (in a container without /etc/machine-id) no machine
+    // identity to bind one to: either way nothing is looked up.
     let state = report["license"]["state"].as_str().unwrap_or_default();
     assert!(
         state == "missing" || state == "unavailable",

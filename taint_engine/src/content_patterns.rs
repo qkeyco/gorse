@@ -427,6 +427,9 @@ const DB_PREFIXES: &[&str] = &[
     "amqp://",
     "amqps://",
     "mssql://",
+    "mariadb://",
+    "smtp://",
+    "smtps://",
 ];
 
 /// Keywords that indicate a password or secret assignment.
@@ -434,6 +437,7 @@ const PASSWORD_KEYWORDS: &[&str] = &[
     "password",
     "passwd",
     "pass",
+    "psw",
     "secret",
     "token",
     "api_key",
@@ -671,24 +675,38 @@ fn check_line_cover(line: &str, line_number: usize) -> (Vec<ContentFinding>, Cov
     check_eth_hex_key(line, line_number, &mut findings, &mut cover);
     // URLs with credentials cover the whole URL; a key inside one
     // (`https://x-access-token:ghp_…@github.com`) is still named by its
-    // service below, so these spans join the cover only after Gitleaks.
+    // service below, so these spans join the cover only after the imported rules.
     let mut url_cover: Cover = Vec::new();
     check_db_connection_string(line, line_number, &mut findings, &mut url_cover);
     check_uri_credentials(line, line_number, &mut findings, &mut url_cover);
     check_curl_user(line, line_number, &mut findings, &mut cover);
 
-    // Gitleaks' service rules (MIT, converted to Gorse's own matcher), for
+    // Betterleaks' service rules (MIT, converted to Gorse's own matcher), for
     // the hundreds of services Gorse has no rule of its own for. They always
     // run, so a second key on a line Gorse already flagged (one-line JSON,
-    // a .env pasted as one line) is still found. A Gitleaks finding is
+    // a .env pasted as one line) is still found. An imported finding is
     // dropped only when its secret overlaps a span a Gorse key finding
-    // already reports: the same key, listed once.
-    for (f, (s, e)) in crate::rules::check_line_gitleaks_spans(line, line_number) {
-        if !overlaps(&cover, s, e) {
-            cover.push((s, e));
-            findings.push(f);
+    // already reports, or one an earlier imported rule reported: the same
+    // key, listed once. Imported spans are kept in an ordered map so a line
+    // with thousands of keys costs a lookup each, not a scan of all before.
+    let mut imported: std::collections::BTreeMap<usize, usize> = std::collections::BTreeMap::new();
+    for (f, (s, e)) in crate::rules::check_line_imported_spans(line, line_number) {
+        if overlaps(&cover, s, e) {
+            continue;
         }
+        // Stored spans never overlap each other, so the one starting last
+        // before `e` is the only one that could overlap `s..e`.
+        if imported
+            .range(..e)
+            .next_back()
+            .is_some_and(|(_, &end)| end > s)
+        {
+            continue;
+        }
+        imported.insert(s, e);
+        findings.push(f);
     }
+    cover.extend(imported);
     cover.extend(url_cover);
 
     // Tier 3: Context-dependent. A value a service rule already named
@@ -1132,6 +1150,12 @@ fn check_api_key_prefixes(
                     })
                 };
                 if (!upper && !digit) || (!upper && suffix.contains(['_', '-']) && !random_part()) {
+                    continue;
+                }
+                // A camelCase identifier (hf_cliLoginWithTokenFromEnvironmentVar)
+                // has capitals too, but splits into readable word pieces;
+                // key material never compresses that well.
+                if crate::rules::tokens::token_ratio(suffix).is_some_and(|ratio| ratio >= 2.5) {
                     continue;
                 }
             }
@@ -1610,7 +1634,7 @@ fn check_eth_hex_key(
         if is_false_positive(candidate) {
             continue;
         }
-        let preview_end = &candidate[..8]; // safe: all ASCII hex
+        let preview_end = &candidate[..4]; // safe: all ASCII hex
         cover.push((pos, pos + 66));
         findings.push(ContentFinding {
             secret_type: ContentSecretType::EthHexKey,
@@ -1685,7 +1709,7 @@ fn check_eth_hex_key(
                 confidence: Confidence::High,
                 context: LineContext::Code,
                 line_number,
-                redacted_preview: format!("{}****", safe_prefix(run, 8)),
+                redacted_preview: format!("{}****", safe_prefix(run, 4)),
                 description: "Possible Ethereum/EVM hex private key near crypto keyword",
             });
             return;
@@ -1706,6 +1730,12 @@ fn check_password_pattern(
         // Every occurrence: `"auth_mode": "pass_through", "pass": "…"` holds
         // the keyword twice and only the second is assigned.
         for (kw_pos, _) in lower.match_indices(keyword) {
+            // Three letters occur by chance in binary data read as text
+            // (`PSw=` inside a browser database): `psw` counts only in its
+            // ordinary spellings.
+            if *keyword == "psw" && !matches!(&line[kw_pos..kw_pos + 3], "psw" | "PSW" | "Psw") {
+                continue;
+            }
             let Some((value, op)) = password_value(line, kw_pos, keyword) else {
                 continue;
             };
@@ -1739,7 +1769,7 @@ fn check_password_pattern(
 /// Whether a keyword names a password or secret itself (`password`,
 /// `pass`, `client_secret`), rather than a token or key.
 fn password_keyword(keyword: &str) -> bool {
-    keyword.contains("pass") || keyword.contains("secret")
+    keyword.contains("pass") || keyword.contains("secret") || keyword == "psw"
 }
 
 /// `8-4-4-4-12` hex: a UUID.
@@ -1895,7 +1925,15 @@ const BARE_KEY_PREFIXES: &[&str] = &[
 /// Keywords that name a password outright: a sentence assigned to one of
 /// these (bare, or behind one `BARE_KEY_PREFIXES` word) may be a pass
 /// phrase.
-const BARE_PASSWORD_NAMES: &[&str] = &["password", "passphrase", "pass", "passwd", "pwd", "secret"];
+const BARE_PASSWORD_NAMES: &[&str] = &[
+    "password",
+    "passphrase",
+    "pass",
+    "passwd",
+    "psw",
+    "pwd",
+    "secret",
+];
 
 /// What the key holding a password keyword says about its value.
 #[derive(Clone, Copy)]
@@ -3044,25 +3082,13 @@ pub fn shannon_entropy(s: &str) -> f64 {
     for &count in &freq {
         if count > 0 {
             let p = count as f64 / len;
-            entropy -= p * log2_approx(p);
+            // Exact, so an imported rule's `entropy < 3.0` means what it
+            // meant upstream (an approximation was off by up to 0.01 bits).
+            entropy -= p * p.log2();
         }
     }
 
     entropy
-}
-
-/// Fast log2 approximation using integer math. Good enough for entropy scoring.
-/// Uses the identity: log2(x) = ln(x) / ln(2), with a polynomial approximation.
-fn log2_approx(x: f64) -> f64 {
-    // For x in (0, 1], log2 is negative. We use bit manipulation for speed.
-    // This is accurate to ~0.01 bits which is fine for entropy thresholds.
-    let bits = x.to_bits();
-    let exponent = ((bits >> 52) & 0x7FF) as i64 - 1023;
-    let mantissa = f64::from_bits((bits & 0x000FFFFFFFFFFFFF) | 0x3FF0000000000000);
-    // Polynomial approximation of log2(mantissa) for mantissa in [1, 2)
-    let m = mantissa - 1.0;
-    let log2_mantissa = m * (1.4426950408889634 - m * 0.7213475204444817);
-    exponent as f64 + log2_mantissa
 }
 
 /// Entropy thresholds for different secret types.
@@ -3284,8 +3310,9 @@ fn check_uri_credentials(
                 continue;
             };
             let password = &userinfo[colon_pos + 1..];
-            // Must have a non-empty password that isn't a placeholder
-            if password.len() < 4 || placeholder_password(password) || example {
+            // Must have a non-empty password that isn't a placeholder. A
+            // short one is still a credential (and a weak one at that).
+            if password.is_empty() || placeholder_password(password) || example {
                 continue;
             }
             cover.push((pos, pos + scheme.len() + at_pos + 1 + host_len));
@@ -3306,7 +3333,7 @@ fn check_uri_credentials(
 }
 
 /// `curl -u user:password` / `--user user:password` / `--user=user:password`.
-/// Gitleaks' `curl-auth-user` covers the same command but its character
+/// Betterleaks' `curl-auth-user` covers the same command but its character
 /// classes stop at symbols such as `!` that real passwords hold.
 fn check_curl_user(
     line: &str,
@@ -4055,6 +4082,16 @@ mod tests {
         assert!(has_password("api_token: \"q8Fz2LkP0vN7mX4c\""));
     }
 
+    #[test]
+    fn psw_counts_only_in_its_ordinary_spellings() {
+        assert!(has_password("psw = \"Tr0ub4dor&3xQ\""));
+        assert!(has_password("PSW=Zk8#qL2vR9wP"));
+        assert!(has_password("Psw: \"q8Fz2LkP0vN7mX4c\""));
+        // Three letters in binary data read as text are not a key.
+        assert!(!has_password("\u{1}\u{7f}PSw=Zk8#qL2vR9wPx\u{3}"));
+        assert!(!has_password("pSW=Zk8#qL2vR9wP"));
+    }
+
     fn has_hex_key(line: &str) -> bool {
         check_line(line, 1)
             .iter()
@@ -4341,7 +4378,7 @@ mod tests {
     }
 
     #[test]
-    fn gitleaks_rules_run_beside_gorse_findings_and_report_a_key_once() {
+    fn imported_rules_run_beside_gorse_findings_and_report_a_key_once() {
         let pk = format!(
             "{}_{}_{}",
             "pk", "live", "51N9xR2mK9pL4vN8cT3wZ6yB1hD5fJ0gS"
@@ -4366,7 +4403,7 @@ mod tests {
             .filter(|x| x.redacted_preview.starts_with("ghp_"))
             .count();
         assert_eq!(n, 1, "{f:?}");
-        // A webhook Gorse names is not listed again by Gitleaks.
+        // A webhook Gorse names is not listed again by an imported rule.
         let hook = format!(
             "https://hooks.slack.com/services/T{}/B{}/{}",
             "Q7XR2MK9P", "L4VN8CT3W", "Zq3Xr7Lm2Np8Vt4Wy6Bc1Dk5"

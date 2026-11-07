@@ -2,7 +2,7 @@
 // Copyright (c) 2026 QKey Co. Source-available, not open source; commercial use requires a licence. See NOTICE.md.
 //! Aho–Corasick keyword automaton, std only.
 //!
-//! Gitleaks runs a rule only when the lowercased line contains one of the
+//! Betterleaks (as Gitleaks before it) runs a rule only when the lowercased line contains one of the
 //! rule's keywords. With ~200 rules, checking each keyword separately would
 //! scan every line hundreds of times; this automaton finds every keyword in
 //! one pass. Matching is ASCII case-insensitive (keywords are lowercased when

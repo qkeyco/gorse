@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Copyright (c) 2026 QKey Co. Source-available, not open source; commercial use requires a licence. See NOTICE.md.
-//! Tests for the imported Gitleaks rules. Every token here is synthetic:
+//! Tests for the imported Betterleaks rules. Every token here is synthetic:
 //! built at run time from a fixed pseudo-random sequence in the shape of the
 //! real format, so no real credential (and no literal that looks like one)
 //! appears in the source.
@@ -36,7 +36,7 @@ fn rule(id: &str) -> &'static GlRule {
 
 /// Ids of the rules that reported a finding on `line`.
 fn hits(line: &str) -> Vec<&'static str> {
-    let findings = check_line_gitleaks(line, 1);
+    let findings = check_line_imported(line, 1);
     RULES
         .iter()
         .filter(|r| findings.iter().any(|f| f.description == r.description))
@@ -46,7 +46,7 @@ fn hits(line: &str) -> Vec<&'static str> {
 
 fn assert_finds(id: &str, line: &str, secret: &str, confidence: Confidence) {
     let r = rule(id);
-    let findings = check_line_gitleaks(line, 7);
+    let findings = check_line_imported(line, 7);
     let f = findings
         .iter()
         .find(|f| f.description == r.description)
@@ -82,7 +82,7 @@ fn every_generated_regex_compiles() {
             }
         }
     }
-    for re in GLOBAL_ALLOWLIST.regexes {
+    for re in GLOBAL_ALLOWLISTS.iter().flat_map(|a| a.regexes.iter()) {
         if let Err(e) = Regex::new(re) {
             failures.push(format!("global allowlist {re}: {e}"));
         }
@@ -97,11 +97,19 @@ fn every_generated_regex_compiles() {
 #[test]
 fn table_is_sane() {
     assert!(
-        gitleaks_rule_count() >= 200,
+        imported_rule_count() >= 400,
         "only {} rules",
-        gitleaks_rule_count()
+        imported_rule_count()
     );
-    assert_eq!(gitleaks_source_version(), "v8.30.1");
+    // The generated table names the version the vendored README pins, so
+    // the monthly import of a new release keeps this test green.
+    let readme = include_str!("../../../third_party/betterleaks/README.md");
+    let pinned = readme
+        .lines()
+        .find_map(|l| l.strip_prefix("- Version: "))
+        .expect("README pins a version");
+    assert_eq!(imported_source_version(), pinned.trim());
+    assert!(imported_source_version().starts_with('v'));
     let mut ids = std::collections::HashSet::new();
     for r in RULES {
         assert!(ids.insert(r.id), "duplicate rule {}", r.id);
@@ -365,9 +373,82 @@ fn ordinary_code_is_quiet() {
 }
 
 #[test]
+fn token_ratio_filter_drops_readable_placeholders() {
+    // 32 lowercase characters pass adafruit's shape and its entropy floor,
+    // but they read as words: upstream's tokenRatio filter drops them, and
+    // so does Gorse.
+    assert!(
+        !hits("adafruit_io_key = 'thisisnotarealkeyjustplaceholder'").contains(&"adafruit-api-key")
+    );
+    // A key-shaped value of the same length is still found.
+    let line = format!("adafruit_io_key = '{}'", synth(LOWER_ALNUM, 32, 31));
+    assert!(
+        hits(&line).contains(&"adafruit-api-key"),
+        "{:?}",
+        hits(&line)
+    );
+}
+
+#[test]
+fn a_slice_of_a_base64_blob_is_not_a_key() {
+    // Inside an encoded image a `/` or `+` makes a word boundary before
+    // "BSA" and after 24–40 more characters, so the Brave rule matched a
+    // slice of the blob. A key is bounded on at least one side.
+    let key = format!("BSA{}", synth(ALNUM, 29, 41));
+    let blob = format!(
+        "<img src=\"data:image/png;base64,iVBORw0KGgo{}/{}+{}AAAASUVORK5CYII=\">",
+        synth(ALNUM, 40, 42),
+        key,
+        synth(ALNUM, 40, 43)
+    );
+    assert!(hits(&blob).is_empty(), "{:?}", hits(&blob));
+    assert!(hits(&format!("BRAVE_API_KEY={key}")).contains(&"brave-search-api-key"));
+    assert!(hits(&format!("\"key\": \"{key}\",")).contains(&"brave-search-api-key"));
+    assert!(
+        hits(&format!("https://api.example.net/search?key={key}&q=x"))
+            .contains(&"brave-search-api-key")
+    );
+}
+
+#[test]
+fn snake_case_identifiers_are_not_tokens() {
+    // Lichess tokens admit `_`, so the rule matched variable names in a
+    // pose-estimation script. Words without a digit are an identifier; a
+    // token has digits, or one run of letters longer than any word.
+    assert!(hits("'lip_sync_offset_frames': round(m),").is_empty());
+    assert!(hits("\"lip_corner_left_outer\": 90.0,").is_empty());
+    let tok = format!("lip_{}", synth(ALNUM, 20, 44));
+    assert!(hits(&format!("LICHESS_TOKEN={tok}")).contains(&"lichess-personal-access-token"));
+    let letters = format!("lip_{}", synth("abcdefghijklmnopqrstuvwxyz", 20, 45));
+    assert!(hits(&format!("token = '{letters}'")).contains(&"lichess-personal-access-token"));
+}
+
+#[test]
+fn upstream_root_filter_applies_to_every_rule() {
+    // Upstream's root-level filter: the alphabet and its example UUID are
+    // never secrets, whichever rule matched them.
+    assert!(hits("token = \"hf_abcdefghijklmnopqrstuvwxyzabcdefgh\"").is_empty());
+    assert!(hits("HEROKU_API_KEY=014df517-39d1-4453-b7b3-9930c563627c").is_empty());
+}
+
+#[test]
+fn one_span_is_one_finding_under_the_rule_that_names_the_key() {
+    // The curl header rule and the Sourcegraph rule capture the same token;
+    // the finding carries the service name, not "Curl Auth Header".
+    let line = format!(
+        "curl -H \"Authorization: Bearer sgp_{}\" https://sourcegraph.example.net/api",
+        synth(HEX, 40, 41)
+    );
+    let h = hits(&line);
+    assert!(h.contains(&"sourcegraph-access-token"), "{h:?}");
+    assert!(!h.contains(&"curl-auth-header"), "{h:?}");
+    assert_eq!(check_line_imported(&line, 1).len(), 1);
+}
+
+#[test]
 fn preview_never_shows_more_than_four_characters() {
     let s = format!("{}{}", "ghp_", synth(ALNUM, 36, 2));
-    for f in check_line_gitleaks(&format!("token: {s}"), 1) {
+    for f in check_line_imported(&format!("token: {s}"), 1) {
         assert!(f.redacted_preview.ends_with("****"));
         assert!(f.redacted_preview.chars().count() <= 8);
         assert!(!f.redacted_preview.contains(&s[4..8]) || s[4..8].contains('*'));
@@ -379,7 +460,7 @@ fn non_ascii_lines_are_safe() {
     let s = format!("{}{}", "ghp_", synth(ALNUM, 36, 2));
     let line = format!("clé = «{s}» 鍵 token");
     assert!(hits(&line).contains(&"github-pat"));
-    let _ = check_line_gitleaks("é".repeat(5000).as_str(), 1);
+    let _ = check_line_imported("é".repeat(5000).as_str(), 1);
 }
 
 // ── Audit regressions (2026-11-06) ──────────────────────────────────────
@@ -387,15 +468,30 @@ fn non_ascii_lines_are_safe() {
 #[test]
 fn global_allowlist_words_are_whole_secrets_only() {
     // `(?i)^true|false|null$` allowed any secret containing "false".
-    assert!(GLOBAL_ALLOWLIST
-        .regexes
-        .contains(&"(?i)^(?:true|false|null)$"));
+    assert!(GLOBAL_ALLOWLISTS
+        .iter()
+        .any(|a| a.regexes.contains(&"(?i)^(?:true|false|null)$")));
+    // Upstream's mis-anchored spelling is not carried beside it.
+    assert!(GLOBAL_ALLOWLISTS
+        .iter()
+        .all(|a| !a.regexes.contains(&"(?i)^true|false|null$")));
     let c = compiled();
+    let globally_allowed = |s: &str| c.global.iter().any(|a| allowed(a, s, s, s));
     for word in ["true", "FALSE", "null"] {
-        assert!(allowed(&c.global, word, word, word), "{word}");
+        assert!(globally_allowed(word), "{word}");
     }
     let s = format!("q7xr{}falsek9pl4vn8ct3wz6yb1hd", "2m");
-    assert!(!allowed(&c.global, &s, &s, &s));
+    assert!(!globally_allowed(&s));
+    // Upstream's root filter: placeholders and repeated characters.
+    for placeholder in [
+        "${API_KEY}",
+        "{{ secret }}",
+        "%TOKEN%",
+        "aaaaaaaaaaaaaaaa",
+        "/Users/alice/key.txt",
+    ] {
+        assert!(globally_allowed(placeholder), "{placeholder}");
+    }
 }
 
 #[test]
@@ -432,7 +528,7 @@ fn repeated_groups_do_not_become_the_secret() {
 fn duplicate_rules_are_merged_and_spans_reported_once() {
     assert!(RULES.iter().all(|r| r.id != "bittrex-secret-key"));
     let line = format!("bittrex_key = \"{}\"", synth(LOWER_ALNUM, 32, 80));
-    let f = check_line_gitleaks(&line, 1);
+    let f = check_line_imported(&line, 1);
     assert_eq!(f.len(), 1, "{f:?}");
     assert_eq!(
         f[0].secret_type,
@@ -511,11 +607,11 @@ fn perf_200k_lines() {
     let start = std::time::Instant::now();
     let mut total = 0;
     for (i, l) in lines.iter().enumerate() {
-        total += check_line_gitleaks(l, i).len();
+        total += check_line_imported(l, i).len();
     }
     let elapsed = start.elapsed();
     println!(
-        "gitleaks rules: {} lines in {:.3} s ({} findings)",
+        "imported rules: {} lines in {:.3} s ({} findings)",
         lines.len(),
         elapsed.as_secs_f64(),
         total
@@ -571,7 +667,7 @@ fn eighty_tokens_on_one_line_are_all_found() {
         let tok = format!("{}{}", "ghp_", synth(ALNUM, 36, 1000 + k));
         line.push_str(&format!("\"t{k}\":\"{tok}\",{}", " ".repeat(1500)));
     }
-    let n = check_line_gitleaks(&line, 1)
+    let n = check_line_imported(&line, 1)
         .iter()
         .filter(|f| f.redacted_preview.starts_with("ghp_"))
         .count();
@@ -587,7 +683,7 @@ fn repeated_keyword_assignments_scan_in_linear_time() {
     let line = one.repeat(360 * 1024 / one.len());
     let _ = compiled();
     let start = std::time::Instant::now();
-    let found = check_line_gitleaks(&line, 1);
+    let found = check_line_imported(&line, 1);
     let took = start.elapsed();
     assert!(!found.is_empty());
     if !cfg!(debug_assertions) {
@@ -603,7 +699,7 @@ fn placeholder_allowlists_match_the_whole_password() {
     assert!(hits("curl -u alice:passwordCedar42 https://192.0.2.10").contains(&"curl-auth-user"));
     assert!(!hits("curl -u \"alice:password\" https://192.0.2.10").contains(&"curl-auth-user"));
     assert!(!hits("curl -u admin:$API_PASS https://192.0.2.10").contains(&"curl-auth-user"));
-    // nuget-config-password: Gitleaks' documented example passwords are
+    // nuget-config-password: the documented example passwords are
     // allowed, a longer password containing one is not.
     let ex = "<add key=\"Password\" value=\"33f!!lloppa\" />";
     assert!(!hits(ex).contains(&"nuget-config-password"));
@@ -640,7 +736,7 @@ fn secret_is_the_first_non_empty_group_not_the_whole_match() {
 fn spans_report_the_secret_position() {
     let tok = format!("{}{}", "ghp_", synth(ALNUM, 36, 5));
     let line = format!("{{\"a\": \"{tok}\"}}");
-    let f = check_line_gitleaks_spans(&line, 1);
+    let f = check_line_imported_spans(&line, 1);
     let (_, (s, e)) = f
         .iter()
         .find(|(x, _)| x.redacted_preview.starts_with("ghp_"))
