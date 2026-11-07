@@ -46,11 +46,8 @@ pub struct ExposureReport {
     /// The verified-report stamp. Present only for a `--verify` run made
     /// under a Pro or Team licence; never carries secret material.
     pub attestation: Option<Attestation>,
-    /// Optional engines that ran over the known credential locations, with
-    /// what each one did. Empty when none is installed or it was switched off.
-    pub engines: Vec<EngineRun>,
     /// Known credential locations that exist but could not be read or
-    /// parsed, and installed engines that failed to run. A non-empty list
+    /// parsed. A non-empty list
     /// means the findings may be missing something: the check is
     /// incomplete, not clean.
     pub coverage_failures: Vec<CoverageFailure>,
@@ -61,7 +58,7 @@ pub struct ExposureReport {
     /// procedure found it and what the provider check said.
     pub finding_meta: Vec<FindingMeta>,
     /// Discovery procedures that ran to completion (ids from
-    /// [`discover::SOURCES`], plus `trufflehog` when the engine ran).
+    /// [`discover::SOURCES`]).
     pub sources_assessed: Vec<String>,
     /// Procedures that did not run to completion, with why.
     pub sources_unavailable: Vec<(String, String)>,
@@ -236,21 +233,6 @@ impl ExposureReport {
     }
 }
 
-/// One optional engine's part in a Fast Scan: never carries secret material.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct EngineRun {
-    pub name: String,
-    pub version: String,
-    /// Known credential locations handed to the engine.
-    pub locations: usize,
-    /// Detections the engine reported.
-    pub detections: usize,
-    /// Detections that became findings: the rest were credentials Gorse
-    /// had already discovered and assessed itself.
-    pub added: usize,
-    pub error: Option<String>,
-}
-
 /// The verified-report stamp: who ran the verification, on which machine,
 /// when, and a checksum of the report together with those three fields.
 ///
@@ -364,9 +346,6 @@ pub struct Options {
     pub verify: bool,
     pub declarations: Option<PathBuf>,
     pub max_hops: Option<usize>,
-    /// Run TruffleHog over the known credential locations when it is
-    /// installed. Off for `--no-trufflehog` and for tests.
-    pub trufflehog: bool,
 }
 
 pub fn run(opts: &Options) -> Result<ExposureReport, String> {
@@ -383,38 +362,13 @@ pub fn run(opts: &Options) -> Result<ExposureReport, String> {
         );
     }
     let mut ctx = Context::from_process(&decl);
-    let (tagged, mut sources) = discover::discover_sources(&mut ctx);
-    let (mut discovered, mut source_of): (Vec<Discovered>, Vec<String>) = tagged
+    let (tagged, sources) = discover::discover_sources(&mut ctx);
+    let (mut discovered, source_of): (Vec<Discovered>, Vec<String>) = tagged
         .into_iter()
         .map(|(d, id)| (d, id.to_string()))
         .unzip();
     let mut notes = std::mem::take(&mut ctx.notes);
     let mut coverage_failures = std::mem::take(&mut ctx.coverage_failures);
-    let mut engines = Vec::new();
-    let trufflehog_id = discover::TRUFFLEHOG_SOURCE;
-    if opts.trufflehog {
-        match trufflehog_pass(&ctx, &mut discovered, &mut notes) {
-            Some(run) => {
-                // An installed engine that did not run leaves its detectors'
-                // coverage missing, which is a gap like an unreadable file.
-                if let Some(error) = &run.error {
-                    coverage_failures.push(CoverageFailure {
-                        location: format!("{} (engine)", run.name),
-                        reason: error.clone(),
-                    });
-                    sources.mark_unavailable(trufflehog_id, format!("the engine failed: {error}"));
-                } else {
-                    sources.assessed.push(trufflehog_id.to_string());
-                }
-                engines.push(run);
-            }
-            None => sources.mark_unavailable(trufflehog_id, "not installed".into()),
-        }
-        // Findings the engine added come after discovery's own.
-        source_of.resize(discovered.len(), trufflehog_id.to_string());
-    } else {
-        sources.mark_unavailable(trufflehog_id, "switched off for this run".into());
-    }
 
     let verifications = if opts.verify {
         let outcome = verify::verify_all(&mut discovered, &decl, &ctx.env);
@@ -489,7 +443,6 @@ pub fn run(opts: &Options) -> Result<ExposureReport, String> {
         declarations_path: decl_path,
         declarations_loaded,
         attestation: None,
-        engines,
         incomplete: !coverage_failures.is_empty(),
         coverage_failures,
         finding_meta,
@@ -498,212 +451,6 @@ pub fn run(opts: &Options) -> Result<ExposureReport, String> {
         record: None,
     };
     Ok(report)
-}
-
-/// Encrypted or binary credential stores (the macOS keychains, the Windows
-/// Credential Manager blobs, GnuPG keyrings). Pattern detectors run over
-/// ciphertext report junk, and the real contents are only reachable through
-/// the store's own API, which Gorse does not call.
-fn is_opaque_store(path: &Path) -> bool {
-    // Encrypted or binary stores TruffleHog cannot read usefully, and the
-    // browser and wallet trees that are large and hold no text secrets.
-    const OPAQUE_COMPONENTS: &[&str] = &[
-        "Keychains",
-        ".gnupg",
-        "gnupg",
-        "keyrings",
-        "kwalletd",
-        "Firefox",
-        ".mozilla",
-        "Login Data",
-        "Bitwarden",
-        "Bitwarden CLI",
-        "Exodus",
-        "exodus.wallet",
-        "Coinomi",
-        "Wasabi",
-        "atomic",
-        "Guarda",
-        "Binance",
-        "TON",
-        "Vault",
-        "Protect",
-        "Credentials",
-    ];
-    path.components().any(|c| {
-        let c = c.as_os_str().to_string_lossy();
-        OPAQUE_COMPONENTS.contains(&c.as_ref())
-            || c.ends_with(".keychain-db")
-            || c.ends_with(".keychain")
-    })
-}
-
-/// The optional second engine's part in the Fast Scan. TruffleHog, when it
-/// is installed, is run once over the known credential locations that exist
-/// on this machine, verification off, so nothing leaves the computer. A
-/// detection in a file Gorse has already read and assessed is dropped:
-/// Gorse's own finding carries the reach. Anything else becomes a
-/// finding that says exactly what is known: a credential is here, the
-/// vendor is recognised, and what it can reach has not been assessed.
-///
-/// Returns `None` when the engine is not installed or switched off, with a
-/// note saying how to add it.
-fn trufflehog_pass(
-    ctx: &Context,
-    discovered: &mut Vec<Discovered>,
-    notes: &mut Vec<String>,
-) -> Option<EngineRun> {
-    use std::sync::atomic::AtomicBool;
-
-    let Some(binary) = crate::trufflehog::locate() else {
-        notes.push(
-            "TruffleHog is not installed: `gorse engines install trufflehog` adds its detectors for hundreds of vendor token formats to this check."
-                .into(),
-        );
-        return None;
-    };
-    let version = crate::trufflehog::version(&binary);
-
-    // The known locations that exist, with anything inside another listed
-    // location dropped so no file is read twice.
-    let mut locations: Vec<PathBuf> = crate::credential_locations()
-        .into_iter()
-        .filter(|l| l.present && !is_opaque_store(&l.path))
-        .map(|l| l.path)
-        .collect();
-    locations.sort();
-    locations.dedup();
-    let nested: Vec<bool> = locations
-        .iter()
-        .map(|p| locations.iter().any(|q| q != p && p.starts_with(q)))
-        .collect();
-    let locations: Vec<PathBuf> = locations
-        .into_iter()
-        .zip(nested)
-        .filter(|(_, inside)| !inside)
-        .map(|(p, _)| p)
-        .collect();
-
-    let mut run = EngineRun {
-        name: "trufflehog".into(),
-        version,
-        locations: locations.len(),
-        detections: 0,
-        added: 0,
-        error: None,
-    };
-    if locations.is_empty() {
-        return Some(run);
-    }
-
-    let found = match crate::trufflehog::scan_paths(&binary, &locations, &AtomicBool::new(false)) {
-        Ok(found) => found,
-        Err(e) => {
-            notes.push(format!("TruffleHog did not complete: {e}"));
-            run.error = Some(e);
-            return Some(run);
-        }
-    };
-    run.detections = found.len();
-
-    // Files Gorse read itself, as absolute paths: the path discovery
-    // recorded, never one recovered from the display location (a file may
-    // itself be named `config (production).yaml`).
-    let covered: Vec<PathBuf> = discovered
-        .iter()
-        .map(|d| {
-            d.source
-                .clone()
-                .unwrap_or_else(|| ctx.expand(&d.credential.location))
-        })
-        .collect();
-    let is_covered = |path: &Path| covered.iter().any(|c| path == c || path.starts_with(c));
-
-    // One finding per (file, detector); further lines in the same file are
-    // counted, not repeated.
-    let (added, counts) = collapse_external(found, |p| ctx.display(p), is_covered);
-    let mut added = added;
-    for (d, n) in added.iter_mut().zip(counts) {
-        if n > 1 {
-            d.credential
-                .evidence
-                .push(format!("{n} occurrences in this file"));
-        }
-    }
-    run.added = added.len();
-    discovered.extend(added);
-    notes.push(format!(
-        "TruffleHog {} checked {} known credential location{} and recognised {} credential{} Gorse has no adapter for; those are listed with their capabilities not assessed, which is not the same as safe.",
-        run.version,
-        run.locations,
-        if run.locations == 1 { "" } else { "s" },
-        run.added,
-        if run.added == 1 { "" } else { "s" },
-    ));
-    Some(run)
-}
-
-/// Fold TruffleHog's lines into one finding per (file, detector), counting
-/// the rest. TruffleHog scans concurrently and prints matches in whatever
-/// order they finish, so the finding's fingerprint is the smallest preview
-/// among the file's lines rather than the first seen: the same file then
-/// yields the same fingerprint on every run, which change detection relies on.
-fn collapse_external(
-    found: Vec<crate::trufflehog::ExternalFinding>,
-    display_of: impl Fn(&Path) -> String,
-    is_covered: impl Fn(&Path) -> bool,
-) -> (Vec<Discovered>, Vec<usize>) {
-    use hedgehog_taint::authority::{CredentialKind, DiscoveredCredential, Fingerprint};
-    let mut added: Vec<Discovered> = Vec::new();
-    let mut counts: Vec<usize> = Vec::new();
-    for f in found {
-        let path = PathBuf::from(&f.path);
-        if is_covered(&path) {
-            continue;
-        }
-        let display = display_of(&path);
-        if let Some(i) = added
-            .iter()
-            .position(|d| d.credential.target == f.detector && d.credential.location == display)
-        {
-            counts[i] += 1;
-            if f.preview < added[i].credential.fingerprint.0 {
-                added[i].credential.fingerprint = Fingerprint(f.preview.clone());
-            }
-            continue;
-        }
-        let file_name = path
-            .file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_else(|| display.clone());
-        let mut cred = DiscoveredCredential::new(
-            CredentialKind::ApiKey,
-            &format!("{} in {file_name}", f.detector),
-            &display,
-            &f.detector,
-        );
-        cred.fingerprint = Fingerprint(f.preview.clone());
-        let what = if f.description.is_empty() {
-            f.detector.clone()
-        } else {
-            f.description.clone()
-        };
-        cred.evidence.push(format!(
-            "recognised by TruffleHog's {} detector at line {} ({what}); what it can reach has not been assessed: Gorse has no adapter for this vendor and verification was off, so nothing was sent anywhere",
-            f.detector, f.line
-        ));
-        if let Some(guide) = &f.rotation_guide {
-            cred.evidence.push(format!("how to rotate: {guide}"));
-        }
-        added.push(Discovered {
-            credential: cred,
-            links: Vec::new(),
-            verify_key: None,
-            source: None,
-        });
-        counts.push(1);
-    }
-    (added, counts)
 }
 
 /// The compromised-laptop simulation. For every node reachable from the
@@ -1256,7 +1003,6 @@ mod tests {
             declarations_path: PathBuf::from("authority.toml"),
             declarations_loaded: false,
             attestation: None,
-            engines: vec![],
             coverage_failures: vec![],
             incomplete: false,
             finding_meta: vec![
@@ -1775,7 +1521,6 @@ mod tests {
             verify: true,
             declarations: Some(map),
             max_hops: Some(2),
-            trufflehog: false,
         })
         .err()
         .expect("opt-out must refuse verify");
@@ -1801,29 +1546,5 @@ mod tests {
             exit_code_for(&found, Severity::Critical, false),
             if worst >= Severity::Critical { 1 } else { 0 }
         );
-    }
-
-    #[test]
-    fn trufflehog_fingerprint_does_not_depend_on_output_order() {
-        use crate::trufflehog::ExternalFinding;
-        let line = |preview: &str| ExternalFinding {
-            path: "/home/u/.azure/accessTokens.json".into(),
-            line: 1,
-            detector: "JWT".into(),
-            description: String::new(),
-            preview: preview.into(),
-            rotation_guide: None,
-            token_type: None,
-            verified: false,
-        };
-        let forward = vec![line("fnv:d06557ce"), line("fnv:cea2d835")];
-        let backward = vec![line("fnv:cea2d835"), line("fnv:d06557ce")];
-        let (a, ca) = collapse_external(forward, |p| p.display().to_string(), |_| false);
-        let (b, cb) = collapse_external(backward, |p| p.display().to_string(), |_| false);
-        assert_eq!(a.len(), 1);
-        assert_eq!(ca, vec![2]);
-        assert_eq!(cb, vec![2]);
-        assert_eq!(a[0].credential.fingerprint.0, "fnv:cea2d835");
-        assert_eq!(a[0].credential.fingerprint.0, b[0].credential.fingerprint.0);
     }
 }

@@ -46,7 +46,6 @@ mod content_scanner;
 mod credential_store;
 mod device_link;
 mod encrypted_store;
-mod engines;
 mod exposure;
 mod heuristics;
 mod history;
@@ -62,7 +61,6 @@ mod selftest;
 mod sso;
 mod support;
 mod team_dashboard;
-mod trufflehog;
 mod update_check;
 mod web;
 
@@ -98,6 +96,9 @@ enum Commands {
         /// Output as JSON (for programmatic consumers)
         #[arg(long)]
         json: bool,
+        /// List the credential locations that exist (paths only, never contents)
+        #[arg(long, short)]
+        verbose: bool,
     },
     /// Scan the files on this computer for exposed secrets
     Scan {
@@ -124,9 +125,6 @@ enum Commands {
         /// (files read, findings so far, current folder). The apps use this.
         #[arg(long, requires = "json")]
         progress: bool,
-        /// Do not run TruffleHog's detectors even when it is installed
-        #[arg(long)]
-        no_trufflehog: bool,
         /// Print, as JSON, the places a default deep scan reads, and exit
         /// (the apps show this list before the first scan)
         #[arg(long, hide = true)]
@@ -262,9 +260,6 @@ enum Commands {
         /// Record a host or system name as production in the map and exit (the apps use this)
         #[arg(long, value_name = "NAME")]
         mark_production: Option<String>,
-        /// Do not run TruffleHog over the known credential locations even if it is installed
-        #[arg(long)]
-        no_trufflehog: bool,
         /// Record this run in the check history and compare it with the previous one (the apps use this)
         #[arg(long, hide = true)]
         record: bool,
@@ -272,9 +267,6 @@ enum Commands {
     /// Scheduled checks: run the exposure check automatically every day or every hour and get a notification when something new appears (Pro)
     #[command(subcommand)]
     Schedule(schedule::ScheduleCommand),
-    /// Optional engines: add TruffleHog's detectors with one download
-    #[command(subcommand)]
-    Engines(EnginesCommand),
     /// Run as MCP tool server (JSON-RPC over stdio)
     Mcp,
     /// Output shell integration code (eval "$(gorse shell-init)") (preview)
@@ -412,32 +404,6 @@ enum Commands {
 }
 
 #[derive(Subcommand)]
-enum EnginesCommand {
-    /// Which optional engines are installed
-    Status {
-        #[arg(long)]
-        json: bool,
-    },
-    /// Download and install an engine (today: trufflehog). One download from
-    /// Truffle Security's GitHub release, checked against a pinned checksum.
-    Install {
-        /// Engine name: trufflehog
-        name: String,
-        #[arg(long)]
-        json: bool,
-        /// With --json: stream download progress as JSON lines on stderr
-        #[arg(long, requires = "json")]
-        progress: bool,
-    },
-    /// Remove an installed engine
-    Remove {
-        name: String,
-        #[arg(long)]
-        json: bool,
-    },
-}
-
-#[derive(Subcommand)]
 enum ServiceAction {
     /// Install and start the systemd service
     Install,
@@ -567,7 +533,7 @@ fn main() {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Status { json } => cmd_status(json),
+        Commands::Status { json, verbose } => cmd_status(json, verbose),
         Commands::Scan {
             all,
             deep,
@@ -576,7 +542,6 @@ fn main() {
             paths,
             include_skipped,
             progress,
-            no_trufflehog,
             list_places,
             resume,
             stop_file,
@@ -592,7 +557,6 @@ fn main() {
                     &paths,
                     include_skipped,
                     progress,
-                    no_trufflehog,
                     resume.as_deref(),
                     stop_file.as_deref(),
                     all_matches,
@@ -667,7 +631,6 @@ fn main() {
             init,
             fail_on,
             mark_production,
-            no_trufflehog,
             record,
         } => cmd_exposure(
             json,
@@ -678,11 +641,9 @@ fn main() {
             init,
             fail_on,
             mark_production,
-            !no_trufflehog,
             record,
         ),
         Commands::Schedule(cmd) => schedule::cmd_schedule(cmd),
-        Commands::Engines(cmd) => cmd_engines(cmd),
         Commands::Mcp => mcp::run_server(),
         Commands::ShellInit { shell } => cmd_shell_init(shell),
         Commands::ShellCheck { command } => cmd_shell_check(&command.join(" ")),
@@ -1249,7 +1210,17 @@ fn sensor_running() -> bool {
     false
 }
 
-fn cmd_status(json: bool) {
+/// A path under the home folder written as ~/…, for display.
+fn tilde(path: &std::path::Path) -> String {
+    if let Some(home) = content_scanner::home_dir() {
+        if let Ok(rest) = path.strip_prefix(&home) {
+            return format!("~/{}", rest.display());
+        }
+    }
+    path.display().to_string()
+}
+
+fn cmd_status(json: bool, verbose: bool) {
     let protection = Protection::gather();
     let total = protection.found_count();
     let protected = protection.protected_count();
@@ -1267,11 +1238,15 @@ fn cmd_status(json: bool) {
             "secrets_total": total,
             "secrets_protected": protected,
             "secrets_unprotected": unprotected,
+            "locations_present": protection
+                .found()
+                .iter()
+                .map(|l| serde_json::json!({"path": tilde(&l.path), "what": l.description}))
+                .collect::<Vec<_>>(),
             "hooks": protection.hooks_json(),
             "sensor_running": protection.sensor_running,
             "tier": credential_store::current_tier().name(),
             "license": credential_store::status(),
-            "issuer_public_key": credential_store::issuer_public_key_base64url(),
             "issuer_public_key": credential_store::issuer_public_key_base64url(),
             "rules_loaded": engine.rule_count(),
             "kernel_bridge": kernel_bridge_status(),
@@ -1289,7 +1264,19 @@ fn cmd_status(json: bool) {
 
     println!("Gorse v{}", env!("CARGO_PKG_VERSION"));
     println!("Platform: {}", platform_name());
-    println!("Credential locations found: {total}");
+    // Files and folders where credentials are usually kept that exist here.
+    // Whether they hold a usable credential is what `gorse exposure` checks,
+    // so the two numbers differ.
+    println!(
+        "Credential locations present: {total} (files where credentials are usually kept; `gorse exposure` checks which hold one)"
+    );
+    if verbose {
+        for l in protection.found() {
+            println!("  {}  {}", tilde(&l.path), l.description);
+        }
+    } else if total > 0 {
+        println!("  List them with `gorse status --verbose`.");
+    }
     for line in protection.protection_lines() {
         println!("{line}");
     }
@@ -1370,7 +1357,7 @@ fn cmd_scan(show_all: bool) {
     }
 
     println!();
-    println!("Credential locations found: {total}");
+    println!("Credential locations present: {total}");
     for line in protection.protection_lines() {
         println!("{line}");
     }
@@ -1755,6 +1742,171 @@ fn is_structural_number(r: &content_scanner::ScanResult) -> bool {
         )
 }
 
+/// Pattern-only matches in test, fixture and example files: the made-up
+/// keys, hashes and phrases that test suites and crypto test vectors are
+/// full of. Exact provider formats (Definitive: a Stripe live key, a GitHub token) are
+/// kept, since a real key committed into a test folder is still real.
+fn is_test_data(r: &content_scanner::ScanResult) -> bool {
+    use hedgehog_taint::content_patterns::{Confidence, ContentSecretType};
+    // Exact provider formats are kept, judged by the kind of secret, not by
+    // a confidence a comment may have lowered.
+    if r.finding.confidence == Confidence::Definitive
+        || matches!(
+            r.finding.secret_type,
+            ContentSecretType::ApiKey { .. }
+                | ContentSecretType::AwsAccessKey
+                | ContentSecretType::PemPrivateKey
+                | ContentSecretType::GoogleServiceAccount
+        )
+    {
+        return false;
+    }
+    let name = r
+        .path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_ascii_lowercase())
+        .unwrap_or_default();
+    // Files where real credentials are kept are never test data.
+    let store = name.starts_with(".env")
+        || name.ends_with(".env")
+        || name.contains(".env.")
+        || matches!(
+            name.as_str(),
+            ".npmrc" | ".pgpass" | ".netrc" | ".pypirc" | ".git-credentials"
+        )
+        || name.starts_with("docker-compose")
+        || name.starts_with("compose.")
+        || name.starts_with("appsettings")
+        || name.starts_with("credentials")
+        || name.starts_with("secrets")
+        || name.ends_with(".pem")
+        || name.ends_with(".key")
+        || name.ends_with(".p12")
+        || name.ends_with(".pfx");
+    if store {
+        return false;
+    }
+    // Only inside a code project, and only folder names inside it: a
+    // project kept under ~/test/ or ~/Documents/Samples/ is not test data.
+    let Some(root) = code_project_root(&r.path) else {
+        return false;
+    };
+    let rel = r
+        .path
+        .strip_prefix(&root)
+        .map(|p| {
+            format!(
+                "/{}",
+                p.to_string_lossy().replace('\\', "/").to_ascii_lowercase()
+            )
+        })
+        .unwrap_or_default();
+    let dirs = [
+        "/test/",
+        "/tests/",
+        "/__tests__/",
+        "/spec/",
+        "/specs/",
+        "/fixture/",
+        "/fixtures/",
+        "/testdata/",
+        "/test-data/",
+        "/test_data/",
+        "/mock/",
+        "/mocks/",
+        "/example/",
+        "/examples/",
+        "/sample/",
+        "/samples/",
+        "/test-vectors/",
+        "/vectors/",
+    ];
+    let code_file = matches!(
+        name.rsplit('.').next().unwrap_or(""),
+        "rs" | "py"
+            | "js"
+            | "ts"
+            | "tsx"
+            | "jsx"
+            | "go"
+            | "java"
+            | "kt"
+            | "swift"
+            | "rb"
+            | "php"
+            | "c"
+            | "cc"
+            | "cpp"
+            | "h"
+            | "hpp"
+            | "cs"
+            | "sol"
+            | "move"
+            | "json"
+    );
+    let by_name = name.contains("_test.")
+        || name.contains(".test.")
+        || name.contains(".spec.")
+        || name.contains("test_vector")
+        || name.contains("test-vector")
+        || name.starts_with("vectors")
+        || name.contains("_vectors")
+        || name.contains("-vectors")
+        || (code_file && name.starts_with("test_"))
+        || name.ends_with(".example")
+        || name.ends_with(".sample");
+    by_name || dirs.iter().any(|d| rel.contains(d))
+}
+
+/// The nearest folder above `path` holding a project marker (.git,
+/// package.json, Cargo.toml …), never the home folder or anything above it
+/// (a dotfiles repo in ~ does not make every document a project file).
+/// Answers are cached per folder.
+fn code_project_root(path: &std::path::Path) -> Option<std::path::PathBuf> {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    static CACHE: OnceLock<Mutex<HashMap<std::path::PathBuf, Option<std::path::PathBuf>>>> =
+        OnceLock::new();
+    const MARKERS: &[&str] = &[
+        ".git",
+        "package.json",
+        "Cargo.toml",
+        "pyproject.toml",
+        "setup.py",
+        "go.mod",
+        "foundry.toml",
+        "hardhat.config.js",
+        "hardhat.config.ts",
+        "pom.xml",
+        "build.gradle",
+        "Gemfile",
+        "composer.json",
+        "Package.swift",
+    ];
+    let dir = path.parent()?;
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some(known) = cache.lock().ok().and_then(|c| c.get(dir).cloned()) {
+        return known;
+    }
+    let home = content_scanner::home_dir();
+    let found = dir
+        .ancestors()
+        .take(12)
+        // Stop at the home folder and anything above it.
+        .take_while(|a| home.as_deref().is_none_or(|h| !h.starts_with(a)))
+        .find(|a| MARKERS.iter().any(|m| a.join(m).exists()))
+        .map(|a| a.to_path_buf());
+    if let Ok(mut c) = cache.lock() {
+        c.insert(dir.to_path_buf(), found.clone());
+    }
+    found
+}
+
+/// Left out of the live list and the report: see the two functions above.
+fn left_out(r: &content_scanner::ScanResult) -> bool {
+    is_structural_number(r) || is_test_data(r)
+}
+
 /// How many matches of one kind a single file may have before they are
 /// shown as one entry: a file with hundreds of "seed phrases" or "API keys"
 /// is a word list, a dataset or an analysis result, not a store of secrets.
@@ -1960,7 +2112,6 @@ fn cmd_deep_scan(
     explicit_paths: &[std::path::PathBuf],
     include_skipped: bool,
     progress: bool,
-    no_trufflehog: bool,
     resume: Option<&std::path::Path>,
     stop_file: Option<&std::path::Path>,
     all_matches: bool,
@@ -2145,6 +2296,8 @@ fn cmd_deep_scan(
 
         let mut ocr_error: Option<String> = None;
         let mut ocr_attempted = false;
+        // Pictures the reader tried but could not read: counted as not checked.
+        let mut ocr_unread = 0usize;
         // Chosen folders get their pictures read too when the app bundles
         // the OCR helper: it runs inside the same folder grant.
         let read_images = !explicit || content_scanner::bundled_ocr_helper().is_some();
@@ -2172,11 +2325,16 @@ fn cmd_deep_scan(
                 if interrupt.load(Ordering::Relaxed) {
                     break;
                 }
-                let (batch_results, batch_err) = content_scanner::ocr_scan_batch(batch);
+                let (batch_results, unread, batch_err) = content_scanner::ocr_scan_batch(batch);
                 if let Some(err) = batch_err {
-                    ocr_error = Some(err);
-                    break;
+                    // No reader at all: stop. A later batch failing (one bad
+                    // picture, a timeout) only costs that batch.
+                    if images_done == total_images - todo.len() {
+                        ocr_error = Some(err);
+                        break;
+                    }
                 }
+                ocr_unread += unread;
                 for r in batch_results {
                     send_finding(&r, saved.findings.len() + all_results.len() + 1);
                     all_results.push(r);
@@ -2212,6 +2370,8 @@ fn cmd_deep_scan(
             }
         }
         let mut newly_done: Vec<String> = Vec::new();
+        // Pattern-only matches in test and example files (is_test_data).
+        let mut test_data_left_out = 0usize;
         let mut live_per_file: std::collections::HashMap<String, usize> =
             std::collections::HashMap::new();
         // The first finished folder is saved at once, then every 10 s.
@@ -2259,8 +2419,8 @@ fn cmd_deep_scan(
                             ))
                             .or_insert(0usize);
                         *shown += 1;
-                        if is_structural_number(result) || *shown > REPEATS_SHOWN {
-                            if resume.is_some() && !is_structural_number(result) {
+                        if left_out(result) || *shown > REPEATS_SHOWN {
+                            if resume.is_some() && !left_out(result) {
                                 live_found.push(finding);
                             }
                             return;
@@ -2335,47 +2495,18 @@ fn cmd_deep_scan(
                     "done": true,
                 }));
             }
-            all_results.extend(
-                outcome
-                    .results
-                    .into_iter()
-                    .filter(|r| !is_structural_number(r)),
-            );
+            test_data_left_out += outcome.results.iter().filter(|r| is_test_data(r)).count();
+            all_results.extend(outcome.results.into_iter().filter(|r| !left_out(r)));
             coverage.merge(outcome.coverage);
             saved.done_dirs.append(&mut newly_done);
-        }
-
-        // Second engine: TruffleHog's detectors, when installed, verification
-        // off so nothing leaves the computer. Its findings join the list
-        // with the detector name as the category; raw secrets are dropped.
-        let mut engines: Vec<serde_json::Value> = Vec::new();
-        let mut external: Vec<trufflehog::ExternalFinding> = Vec::new();
-        if !no_trufflehog && !interrupt.load(Ordering::Relaxed) {
-            if let Some(binary) = trufflehog::locate() {
-                if progress {
-                    emit(serde_json::json!({"event": "phase", "name": "trufflehog"}));
-                }
-                let version = trufflehog::version(&binary);
-                match trufflehog::scan(&binary, &dirs, &interrupt) {
-                    Ok(found) => {
-                        engines.push(serde_json::json!({
-                            "name": "trufflehog", "version": version, "findings": found.len(),
-                            "verification": "off",
-                        }));
-                        external = found;
-                    }
-                    Err(e) => {
-                        engines.push(serde_json::json!({
-                            "name": "trufflehog", "version": version, "error": e,
-                        }));
-                    }
-                }
-            }
         }
 
         // Pictures are counted while the folders are walked, so whether
         // their text was read is settled only now.
         apply_image_coverage(&mut coverage, images_read, ocr_error.is_some());
+        if ocr_error.is_none() {
+            coverage.images_content_not_checked += ocr_unread;
+        }
         coverage.interrupted |= interrupt.load(Ordering::Relaxed);
         coverage.finalize();
         if progress {
@@ -2408,29 +2539,13 @@ fn cmd_deep_scan(
                 let _ = std::fs::remove_file(path);
             }
         }
-        for f in &external {
-            findings.push(serde_json::json!({
-                "path": f.path,
-                "category": format!("{} (TruffleHog)", f.detector),
-                "severity": if f.verified { "critical" } else { "high" },
-                "confidence": "high",
-                "context": "data",
-                "line": f.line,
-                "preview": f.preview,
-                "description": if let Some(t) = &f.token_type { format!("{} recognised by TruffleHog's {} detector", t, f.detector) } else { format!("{} secret recognised by TruffleHog's detector{}", f.detector, if f.description.is_empty() { String::new() } else { format!(": {}", f.description) }) },
-                "rotation_guide": f.rotation_guide,
-                "engine": "trufflehog",
-                "likelihood": if f.verified { 99 } else { 85 },
-                "group": "credential",
-            }));
-        }
-
         let mut coverage_json = serde_json::to_value(&coverage).unwrap_or_default();
         if let Some(map) = coverage_json.as_object_mut() {
             map.insert("notes_unreadable".into(), notes_unreadable.into());
             if let Some(n) = notes_read {
                 map.insert("notes_read".into(), n.into());
             }
+            map.insert("test_data_left_out".into(), test_data_left_out.into());
         }
         // Saved progress keeps every match; only the report folds repeats.
         let findings = if all_matches {
@@ -2441,7 +2556,6 @@ fn cmd_deep_scan(
         let output = serde_json::json!({
             "findings": findings,
             "total": findings.len(),
-            "engines": engines,
             "files_scanned": coverage.files_scanned,
             "elapsed_secs": elapsed,
             "interrupted": interrupt.load(Ordering::Relaxed),
@@ -2500,7 +2614,11 @@ fn cmd_deep_scan(
                 ScanEvent::DirDone { .. } => {}
             }),
         );
-        dashboard.all_results.extend(outcome.results);
+        // The same left-out rules as the JSON scan (drawings, lock files,
+        // test data inside code projects).
+        dashboard
+            .all_results
+            .extend(outcome.results.into_iter().filter(|r| !left_out(r)));
         dashboard.coverage.merge(outcome.coverage);
         dashboard.files_scanned = dashboard.coverage.files_scanned;
     }
@@ -2508,7 +2626,11 @@ fn cmd_deep_scan(
     // Scan images with OCR in batches (only if not interrupted)
     let mut ocr_attempted = false;
     let mut ocr_failed = false;
-    if !explicit && !interrupt.load(Ordering::Relaxed) {
+    let mut dash_unread = 0usize;
+    // As in the JSON scan: chosen folders get their pictures read when the
+    // bundled OCR helper is present.
+    let read_images = !explicit || content_scanner::bundled_ocr_helper().is_some();
+    if read_images && !interrupt.load(Ordering::Relaxed) {
         dashboard.dirs_done = dirs.len();
         dashboard.status_line = "Collecting images for OCR...".to_string();
         dashboard.elapsed_secs = start.elapsed().as_secs();
@@ -2538,11 +2660,15 @@ fn cmd_deep_scan(
             dashboard.elapsed_secs = start.elapsed().as_secs();
             dashboard.draw();
 
-            let (batch_results, batch_err) = content_scanner::ocr_scan_batch(batch);
+            let first_batch = images_done == 0;
+            let (batch_results, unread, batch_err) = content_scanner::ocr_scan_batch(batch);
             if let Some(err) = batch_err {
-                ocr_error = Some(err);
-                break;
+                if first_batch {
+                    ocr_error = Some(err);
+                    break;
+                }
             }
+            dash_unread += unread;
 
             if !batch_results.is_empty() {
                 dashboard.counts[cat_idx] += batch_results.len();
@@ -2561,6 +2687,9 @@ fn cmd_deep_scan(
         }
     }
     apply_image_coverage(&mut dashboard.coverage, ocr_attempted, ocr_failed);
+    if !ocr_failed {
+        dashboard.coverage.images_content_not_checked += dash_unread;
+    }
 
     // Scan Apple Notes (macOS only, and only if not interrupted)
     if notes_phase && !explicit && !interrupt.load(Ordering::Relaxed) {
@@ -3807,7 +3936,6 @@ fn cmd_exposure(
     init: bool,
     fail_on: Option<String>,
     mark_production: Option<String>,
-    trufflehog: bool,
     record: bool,
 ) {
     use exposure::config::Declarations;
@@ -3901,7 +4029,6 @@ fn cmd_exposure(
         verify,
         declarations: map,
         max_hops,
-        trufflehog,
     }) {
         Ok(r) => r,
         Err(e) => {
@@ -4226,7 +4353,7 @@ fn cmd_install() {
     let engine = load_engine();
 
     println!(
-        "   Credential locations found: {}",
+        "   Credential locations present: {}",
         protection.found_count()
     );
     for line in protection.protection_lines() {
@@ -6334,128 +6461,6 @@ fn add_platform_secrets(detector: &mut SecretDetector) {
     let _ = detector;
 }
 
-fn cmd_engines(cmd: EnginesCommand) {
-    match cmd {
-        EnginesCommand::Status { json } => {
-            let installed = engines::trufflehog_installed();
-            let on_path = installed.is_none() && trufflehog::locate().is_some();
-            if json {
-                println!(
-                    "{}",
-                    serde_json::json!({
-                        "trufflehog": {
-                            "installed": installed.is_some() || on_path,
-                            "managed": installed.is_some(),
-                            "path": installed.as_ref().map(|p| p.display().to_string()).or_else(|| trufflehog::locate().map(|p| p.display().to_string())),
-                            "version": installed.as_ref().map(|p| engines::installed_version(p)),
-                            "available_version": engines::TRUFFLEHOG_VERSION,
-                            "download_mb": engines::TRUFFLEHOG_DOWNLOAD_MB,
-                        }
-                    })
-                );
-                return;
-            }
-            match (installed, on_path) {
-                (Some(p), _) => println!(
-                    "trufflehog: installed by Gorse at {} (version {})",
-                    p.display(),
-                    engines::installed_version(&p)
-                ),
-                (None, true) => println!("trufflehog: found on PATH (not managed by Gorse)"),
-                (None, false) => println!(
-                    "trufflehog: not installed. Add it with `gorse engines install trufflehog` ({} MB download from GitHub).",
-                    engines::TRUFFLEHOG_DOWNLOAD_MB
-                ),
-            }
-        }
-        EnginesCommand::Install {
-            name,
-            json,
-            progress,
-        } => {
-            if name != "trufflehog" {
-                if json {
-                    println!(
-                        "{}",
-                        serde_json::json!({"error": format!("unknown engine {name}")})
-                    );
-                } else {
-                    eprintln!("Unknown engine {name}. Available: trufflehog");
-                }
-                std::process::exit(2);
-            }
-            let mut last = std::time::Instant::now() - std::time::Duration::from_secs(1);
-            let mut on_progress = |got: u64, total: Option<u64>| {
-                if !progress {
-                    return;
-                }
-                let finished = total.is_some_and(|t| got >= t);
-                if last.elapsed() < std::time::Duration::from_millis(200) && !finished {
-                    return;
-                }
-                last = std::time::Instant::now();
-                use std::io::Write;
-                let mut err = std::io::stderr().lock();
-                let _ = writeln!(
-                    err,
-                    "{}",
-                    serde_json::json!({"event": "download", "received": got, "total": total})
-                );
-            };
-            match engines::install_trufflehog(Some(&mut on_progress)) {
-                Ok(path) => {
-                    if json {
-                        println!(
-                            "{}",
-                            serde_json::json!({"installed": "trufflehog", "path": path.display().to_string(), "version": engines::TRUFFLEHOG_VERSION})
-                        );
-                    } else {
-                        println!(
-                            "Installed TruffleHog {} at {}. Deep scans now use its detectors, with verification off.",
-                            engines::TRUFFLEHOG_VERSION,
-                            path.display()
-                        );
-                    }
-                }
-                Err(e) => {
-                    if json {
-                        println!("{}", serde_json::json!({"error": e}));
-                    } else {
-                        eprintln!("Could not install TruffleHog: {e}");
-                    }
-                    std::process::exit(2);
-                }
-            }
-        }
-        EnginesCommand::Remove { name, json } => {
-            if name != "trufflehog" {
-                eprintln!("Unknown engine {name}");
-                std::process::exit(2);
-            }
-            match engines::remove_trufflehog() {
-                Ok(removed) => {
-                    if json {
-                        println!("{}", serde_json::json!({"removed": removed}));
-                    } else {
-                        println!(
-                            "{}",
-                            if removed {
-                                "Removed TruffleHog."
-                            } else {
-                                "TruffleHog was not installed by Gorse."
-                            }
-                        );
-                    }
-                }
-                Err(e) => {
-                    eprintln!("Could not remove TruffleHog: {e}");
-                    std::process::exit(2);
-                }
-            }
-        }
-    }
-}
-
 #[cfg(test)]
 mod linux_tester_tests {
     use super::*;
@@ -6547,5 +6552,79 @@ mod finding_noise_tests {
             .map(|_| finding("/d/a.env", "Password"))
             .collect();
         assert_eq!(collapse_repeats(list).len(), REPEATS_SHOWN);
+    }
+}
+
+#[cfg(test)]
+mod test_data_tests {
+    use super::*;
+    use hedgehog_taint::content_patterns::{
+        Confidence, ContentFinding, ContentSecretType, LineContext,
+    };
+
+    fn result(path: std::path::PathBuf, kind: ContentSecretType) -> content_scanner::ScanResult {
+        content_scanner::ScanResult {
+            path,
+            finding: ContentFinding {
+                secret_type: kind,
+                confidence: Confidence::High,
+                context: LineContext::Code,
+                line_number: 1,
+                redacted_preview: "x****".into(),
+                description: "test",
+            },
+        }
+    }
+
+    #[test]
+    fn test_data_is_left_out_only_inside_code_projects_and_never_env_files() {
+        let root = std::env::temp_dir().join(format!("gorse_testdata_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let project = root.join("proj");
+        std::fs::create_dir_all(project.join(".git")).unwrap();
+        std::fs::create_dir_all(project.join("test")).unwrap();
+        let docs = root.join("Documents/Samples");
+        std::fs::create_dir_all(&docs).unwrap();
+
+        let pw = || ContentSecretType::PasswordPattern;
+        // Inside a project's test folder: left out.
+        assert!(is_test_data(&result(
+            project.join("test/fixtures.json"),
+            pw()
+        )));
+        // A .env in that test folder: kept.
+        assert!(!is_test_data(&result(project.join("test/.env"), pw())));
+        // A person's own Samples folder, no project: kept.
+        assert!(!is_test_data(&result(
+            docs.join("wallet-backup.txt"),
+            ContentSecretType::SeedPhrase
+        )));
+        // test_logins.txt on the Desktop: kept.
+        assert!(!is_test_data(&result(root.join("test_logins.txt"), pw())));
+        // eigenvectors.csv is not a test-vector file.
+        assert!(!is_test_data(&result(
+            project.join("eigenvectors.csv"),
+            pw()
+        )));
+        // Credential stores in a test folder are kept.
+        assert!(!is_test_data(&result(project.join("test/.npmrc"), pw())));
+        assert!(!is_test_data(&result(
+            project.join("test/docker-compose.yml"),
+            pw()
+        )));
+        // A project kept under a folder called "test" is not all test data.
+        let under_test = root.join("test/shop");
+        std::fs::create_dir_all(under_test.join(".git")).unwrap();
+        std::fs::create_dir_all(under_test.join("src")).unwrap();
+        assert!(!is_test_data(&result(
+            under_test.join("src/config.json"),
+            pw()
+        )));
+        // An API key in a test file's comment is kept (exact format).
+        assert!(!is_test_data(&result(
+            project.join("test/a.rs"),
+            ContentSecretType::ApiKey { service: "GitHub" }
+        )));
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

@@ -405,9 +405,8 @@ impl SecretDetector {
     /// each real user under /Users so their secrets are tracked too.
     ///
     /// Every entry here is on the reported watch list: `gorse status` and
-    /// `scan --all` list it, the Fast Scan checks whether it exists and hands
-    /// it to TruffleHog, and the agent guard treats reads of it as secret
-    /// access. The register in hedgehog-cli/data/credential-locations.toml
+    /// `scan --all` list it, the Fast Scan checks whether it exists, and the
+    /// agent guard treats reads of it as secret access. The register in hedgehog-cli/data/credential-locations.toml
     /// records the published source for each one; a test there fails when
     /// this list and the register drift apart.
     ///

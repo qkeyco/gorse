@@ -69,9 +69,8 @@ pub enum ScheduleCommand {
         json: bool,
     },
     /// Accept the latest recorded check as the baseline, even if it is
-    /// incomplete (for example after removing TruffleHog on purpose); later
-    /// checks are compared with it and its missing coverage is no longer
-    /// reported as lost
+    /// incomplete; later checks are compared with it and its missing
+    /// coverage is no longer reported as lost
     AcceptBaseline {
         /// Output as JSON (for programmatic consumers)
         #[arg(long)]
@@ -228,8 +227,8 @@ pub struct Changes {
     pub resolved: Vec<ChangeEntry>,
     pub improved: Vec<ChangeEntry>,
     /// Previous findings missing now whose discovery source this run did
-    /// not assess (an engine no longer installed, a file it could not
-    /// interpret). Never resolved: nobody looked.
+    /// not assess (a file it could not interpret). Never resolved: nobody
+    /// looked.
     pub unassessed: Vec<ChangeEntry>,
     /// Counts before the lists were capped.
     pub new_count: usize,
@@ -240,9 +239,6 @@ pub struct Changes {
     /// One coverage failure per source behind `unassessed`; added to the
     /// recorded report so it is incomplete and never becomes the baseline.
     pub unassessed_failures: Vec<crate::exposure::CoverageFailure>,
-    /// The previous run had the TruffleHog engine's coverage and this one
-    /// does not.
-    pub engine_coverage_lost: bool,
     /// No previous run to compare with.
     pub first_run: bool,
     /// The current run could not read every known credential location.
@@ -261,11 +257,7 @@ impl Changes {
     /// A notification is due when something is new or worse, or coverage
     /// was lost, and there was a previous run to compare with.
     pub fn notify(&self) -> bool {
-        !self.first_run
-            && (self.new_count > 0
-                || self.worsened_count > 0
-                || self.coverage_lost
-                || self.engine_coverage_lost)
+        !self.first_run && (self.new_count > 0 || self.worsened_count > 0 || self.coverage_lost)
     }
 
     pub fn json(&self) -> serde_json::Value {
@@ -276,7 +268,6 @@ impl Changes {
             "incomplete": self.incomplete,
             "coverage_failures": self.coverage_failures,
             "coverage_lost": self.coverage_lost,
-            "engine_coverage_lost": self.engine_coverage_lost,
             "counts": {
                 "new": self.new_count,
                 "worsened": self.worsened_count,
@@ -332,31 +323,12 @@ fn str_field(v: &serde_json::Value, key: &str) -> String {
 }
 
 /// Identity of a finding across runs: `(kind, location, fingerprint)`.
-///
-/// A finding an optional engine reported (TruffleHog) stands for a file and
-/// a detector, not one token: the engine may pick a different token from
-/// the same file on each run, so its fingerprint would flap and raise a
-/// false "new finding" alert. Those use the detector name in place of the
-/// fingerprint.
 fn finding_key(f: &serde_json::Value) -> (String, String, String) {
-    let identity = if is_engine_finding(f) {
-        format!("engine:{}", str_field(f, "target"))
-    } else {
-        str_field(f, "fingerprint")
-    };
-    (str_field(f, "kind"), str_field(f, "location"), identity)
-}
-
-fn is_engine_finding(f: &serde_json::Value) -> bool {
-    f.get("evidence")
-        .and_then(|e| e.as_array())
-        .map(|lines| {
-            lines.iter().any(|line| {
-                line.as_str()
-                    .is_some_and(|s| s.starts_with("recognised by TruffleHog"))
-            })
-        })
-        .unwrap_or(false)
+    (
+        str_field(f, "kind"),
+        str_field(f, "location"),
+        str_field(f, "fingerprint"),
+    )
 }
 
 fn entry_of(f: &serde_json::Value, previous_severity: Option<String>) -> ChangeEntry {
@@ -393,11 +365,6 @@ fn unavailable_reason(report: &serde_json::Value, source: &str) -> String {
         .and_then(|u| u.get("reason").and_then(|r| r.as_str()))
         .map(str::to_string)
         .unwrap_or_else(|| "it did not run".to_string())
-}
-
-/// The coverage failure of a run that lost the TruffleHog engine.
-pub fn engine_lost_reason(why: &str) -> String {
-    format!("TruffleHog ran in the previous check and did not run in this one ({why})")
 }
 
 /// Mark a report incomplete with the coverage failures for sources a
@@ -466,13 +433,6 @@ pub fn diff(previous: Option<&serde_json::Value>, current: &serde_json::Value) -
         ..Default::default()
     };
     let assessed_now = sources_assessed(current);
-    let engine = crate::exposure::discover::TRUFFLEHOG_SOURCE;
-    changes.engine_coverage_lost = match (previous.and_then(sources_assessed), &assessed_now) {
-        (Some(before), Some(now)) => {
-            before.iter().any(|s| s == engine) && !now.iter().any(|s| s == engine)
-        }
-        _ => false,
-    };
     let now: Vec<_> = findings_of(current);
     let before: Vec<_> = previous.map(findings_of).unwrap_or_default();
     let before_by_key: std::collections::HashMap<_, _> =
@@ -560,13 +520,7 @@ pub fn diff(previous: Option<&serde_json::Value>, current: &serde_json::Value) -
         })
         .unwrap_or_default();
     for (source, reason) in unassessed_sources {
-        // Losing the engine gets its own failure below, whatever it found.
-        if changes.engine_coverage_lost && source == engine {
-            continue;
-        }
-        let explained = listed
-            .iter()
-            .any(|l| reason.contains(l.as_str()) || *l == format!("{source} (engine)"));
+        let explained = listed.iter().any(|l| reason.contains(l.as_str()));
         if explained {
             changes.incomplete = true;
             continue;
@@ -577,24 +531,6 @@ pub fn diff(previous: Option<&serde_json::Value>, current: &serde_json::Value) -
                 location: format!("{source} (source)"),
                 reason: format!("source {source} was not assessed in this run ({reason})"),
             });
-    }
-    // The engine ran last time and not now: the files only it reads were
-    // not examined, so the run is incomplete even when the engine found
-    // nothing before (otherwise such a run would quietly become the
-    // baseline without the engine). An engine that failed to run is
-    // already listed as a coverage failure.
-    if changes.engine_coverage_lost {
-        let already_listed = listed.iter().any(|l| *l == format!("{engine} (engine)"));
-        if already_listed {
-            changes.incomplete = true;
-        } else {
-            changes
-                .unassessed_failures
-                .push(crate::exposure::CoverageFailure {
-                    location: format!("{engine} (source)"),
-                    reason: engine_lost_reason(&unavailable_reason(current, engine)),
-                });
-        }
     }
     if !changes.unassessed_failures.is_empty() {
         changes.incomplete = true;
@@ -793,7 +729,6 @@ impl RunRecord {
             "resolved": self.changes.resolved_count,
             "improved": self.changes.improved_count,
             "unassessed": self.changes.unassessed_count,
-            "engine_coverage_lost": self.changes.engine_coverage_lost,
             "first_run": self.changes.first_run,
             "notify": self.changes.notify(),
             "message": self.message,
@@ -975,12 +910,6 @@ pub fn notification_body(changes: &Changes) -> String {
             body.push_str(&format!(" Highest: {sev}."));
         }
     }
-    if changes.engine_coverage_lost {
-        if !body.is_empty() {
-            body.push(' ');
-        }
-        body.push_str("TruffleHog engine coverage was lost: it did not run this time.");
-    }
     if changes.coverage_lost {
         if !body.is_empty() {
             body.push(' ');
@@ -1017,11 +946,7 @@ pub fn applescript_escape(text: &str) -> String {
 pub fn notify(changes: &Changes) {
     let body = notification_body(changes);
     let subtitle = if changes.new_count == 0 && changes.worsened_count == 0 {
-        if changes.coverage_lost {
-            "Exposure check: incomplete"
-        } else {
-            "Exposure check: engine coverage lost"
-        }
+        "Exposure check: incomplete"
     } else {
         "Exposure check: something changed"
     };
@@ -2065,13 +1990,10 @@ fn cmd_run(json: bool) {
         // picks up again without reinstalling anything.
         record_failure(Trigger::Scheduled, LICENCE_REQUIRED)
     } else {
-        // `trufflehog: true` only means "use it if it is installed"; the
-        // exposure check never downloads anything.
         match crate::exposure::run(&crate::exposure::Options {
             verify: false,
             declarations: None,
             max_hops: None,
-            trufflehog: true,
         }) {
             Ok(report) => {
                 let value = crate::exposure::report::render_json(&report);
@@ -2265,75 +2187,7 @@ mod tests {
     }
 
     #[test]
-    fn losing_the_engine_is_notified_and_its_findings_are_unassessed() {
-        let before = with_sources(
-            report(vec![sourced(
-                "ApiKey",
-                "~/.azure/msal_token_cache.json",
-                "fnv:1",
-                "trufflehog",
-            )]),
-            &["kubeconfig", "trufflehog"],
-            &[],
-        );
-        let now = with_sources(
-            report(vec![]),
-            &["kubeconfig"],
-            &[("trufflehog", "not installed")],
-        );
-        let changes = diff(Some(&before), &now);
-        assert!(changes.engine_coverage_lost);
-        assert_eq!(changes.resolved_count, 0);
-        assert_eq!(changes.unassessed_count, 1);
-        assert!(changes.incomplete);
-        assert_eq!(changes.unassessed_failures.len(), 1);
-        assert_eq!(
-            changes.unassessed_failures[0].reason,
-            "TruffleHog ran in the previous check and did not run in this one (not installed)"
-        );
-        let body = notification_body(&changes);
-        assert!(
-            body.contains("TruffleHog engine coverage was lost"),
-            "{body}"
-        );
-        assert!(
-            body.contains("1 earlier finding could not be reassessed"),
-            "{body}"
-        );
-        assert!(!body.contains("msal"), "{body}");
-
-        // Engine gone but it had found nothing: nothing is unassessed, but
-        // the files only the engine reads were not examined, so the run is
-        // still incomplete and never becomes the baseline.
-        let before = with_sources(report(vec![]), &["trufflehog"], &[]);
-        let changes = diff(Some(&before), &now);
-        assert!(changes.engine_coverage_lost);
-        assert_eq!(changes.unassessed_count, 0);
-        assert!(changes.incomplete);
-        assert_eq!(changes.coverage_failures, 1);
-        assert_eq!(
-            changes.unassessed_failures[0].reason,
-            "TruffleHog ran in the previous check and did not run in this one (not installed)"
-        );
-        assert!(changes.notify());
-        let mut recorded = now.clone();
-        apply_unassessed(&mut recorded, &changes);
-        assert!(is_incomplete(&recorded));
-
-        // An engine that failed to run is already a listed failure.
-        let mut failed = with_sources(
-            report(vec![]),
-            &["kubeconfig"],
-            &[("trufflehog", "the engine failed: boom")],
-        );
-        failed["incomplete"] = serde_json::json!(true);
-        failed["coverage_failures"] =
-            serde_json::json!([{"location": "trufflehog (engine)", "reason": "boom"}]);
-        let changes = diff(Some(&before), &failed);
-        assert!(changes.incomplete);
-        assert!(changes.unassessed_failures.is_empty());
-
-        // An unreadable file already listed is not listed twice.
+    fn an_unreadable_file_already_listed_is_not_listed_twice() {
         let before = with_sources(
             report(vec![sourced(
                 "AwsKey",
@@ -2440,29 +2294,6 @@ mod tests {
         let j = changes.json();
         assert_eq!(j["worsened"][0]["previous_severity"], "high");
         assert!(j["new"][0].get("previous_severity").is_none());
-    }
-
-    #[test]
-    fn engine_findings_are_identified_by_file_and_detector() {
-        let engine = |fp: &str| {
-            serde_json::json!({
-                "kind": "ApiKey", "location": "~/.azure/accessTokens.json",
-                "fingerprint": fp, "target": "JWT", "severity": "low",
-                "evidence": ["recognised by TruffleHog's JWT detector at line 1 (A JSON Web Token)"]
-            })
-        };
-        assert_eq!(
-            finding_key(&engine("JWT secret fnv:cea2d835")),
-            finding_key(&engine("JWT secret fnv:d06557ce"))
-        );
-        let own = |fp: &str| {
-            serde_json::json!({
-                "kind": "ApiKey", "location": "~/.azure/accessTokens.json",
-                "fingerprint": fp, "target": "JWT", "severity": "low",
-                "evidence": ["found in the Azure CLI token cache"]
-            })
-        };
-        assert_ne!(finding_key(&own("fnv:1")), finding_key(&own("fnv:2")));
     }
 
     #[test]

@@ -150,7 +150,7 @@ fn status_shows_info() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("Gorse v"), "status should show version");
     assert!(
-        stdout.contains("Credential locations found:"),
+        stdout.contains("Credential locations present:"),
         "status should show how many credential locations exist"
     );
     assert!(stdout.contains("Tier:"), "status should show tier");
@@ -269,13 +269,15 @@ fn stdout_of(output: &Output) -> String {
     String::from_utf8_lossy(&output.stdout).into_owned()
 }
 
-/// The number after "Credential locations found:" in human output.
+/// The number after "Credential locations present:" in human output.
 fn found_count(stdout: &str) -> usize {
     stdout
         .lines()
-        .find_map(|l| l.trim().strip_prefix("Credential locations found:"))
+        .find_map(|l| l.trim().strip_prefix("Credential locations present:"))
         .unwrap_or_else(|| panic!("no found count in:\n{stdout}"))
-        .trim()
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
         .parse()
         .expect("found count is a number")
 }
@@ -1059,9 +1061,6 @@ fn exposure_command(home: &TestHome) -> Command {
         .env("USERPROFILE", home.root.join("home"))
         .env("XDG_CONFIG_HOME", home.root.join("home/.config"))
         .env("HEDGEHOG_STATE_DIR", home.root.join("state"))
-        // A developer's own TruffleHog must not run over the fixtures; the
-        // test that wants it removes this.
-        .env("HEDGEHOG_NO_TRUFFLEHOG", "1")
         // Windows keeps Gorse's config under %APPDATA%\hedgehog, not under
         // the home directory; point it inside the fixture home so the
         // infrastructure map lands where the CLI looks on every platform.
@@ -1395,262 +1394,6 @@ fn deep_scan_progress_streams_json_lines_on_stderr() {
     );
 }
 
-#[cfg(unix)]
-#[test]
-fn deep_scan_runs_trufflehog_when_installed_and_keeps_no_secret() {
-    // A stand-in `trufflehog` on PATH answers with one finding. The report
-    // gains it as "<Detector> (TruffleHog)" with the rotation guide and the
-    // engine's version, the raw secret never appears anywhere in the output,
-    // the tool is called with verification off, and --no-trufflehog skips it.
-    use std::os::unix::fs::PermissionsExt;
-    let home = TestHome::new();
-    write_home(
-        &home,
-        "Documents/proj/app.env",
-        "DATABASE=postgres://user:pw@db/app\n",
-    );
-    let root = home.root.join("home/Documents");
-    let tools = home.root.join("tools");
-    std::fs::create_dir_all(&tools).unwrap();
-    let args_log = home.root.join("trufflehog-args.txt");
-    let script = format!(
-        "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo 'trufflehog 9.9.9'; exit 0; fi\necho \"$@\" > '{}'\necho '{{\"SourceMetadata\":{{\"Data\":{{\"Filesystem\":{{\"file\":\"{}/proj/app.env\",\"line\":1}}}}}},\"DetectorName\":\"Postgres\",\"DetectorDescription\":\"Postgres connection.\",\"Verified\":false,\"Raw\":\"RAWSECRETVALUE123\",\"Redacted\":\"\",\"ExtraData\":{{\"rotation_guide\":\"https://howtorotate.com/docs/tutorials/postgres/\"}}}}'\n",
-        args_log.display(),
-        root.display()
-    );
-    let bin = tools.join("trufflehog");
-    std::fs::write(&bin, script).unwrap();
-    std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
-
-    let out = home
-        .command()
-        .env("PATH", tools.display().to_string())
-        .args(["scan", "--deep", "--json", "--path", root.to_str().unwrap()])
-        .output()
-        .unwrap();
-    assert!(out.status.success(), "{out:?}");
-    let text = String::from_utf8_lossy(&out.stdout).to_string();
-    assert!(
-        !text.contains("RAWSECRETVALUE123"),
-        "the raw secret must never reach the report"
-    );
-    let report: serde_json::Value = serde_json::from_str(&text).unwrap();
-    let th = report["findings"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|f| f["category"] == "Postgres (TruffleHog)")
-        .unwrap_or_else(|| panic!("no TruffleHog finding in {text}"));
-    assert_eq!(th["engine"], "trufflehog");
-    assert_eq!(th["severity"], "high");
-    assert_eq!(
-        th["rotation_guide"],
-        "https://howtorotate.com/docs/tutorials/postgres/"
-    );
-    assert!(
-        th["preview"]
-            .as_str()
-            .unwrap()
-            .starts_with("Postgres secret "),
-        "{}",
-        th["preview"]
-    );
-    let engines = report["engines"].as_array().unwrap();
-    assert_eq!(engines[0]["name"], "trufflehog");
-    assert_eq!(engines[0]["version"], "9.9.9");
-    assert_eq!(engines[0]["verification"], "off");
-    let called = std::fs::read_to_string(&args_log).unwrap();
-    assert!(
-        called.contains("--no-verification"),
-        "verification must be off: {called}"
-    );
-    assert!(called.contains("filesystem"), "{called}");
-
-    let skipped = home
-        .command()
-        .env("PATH", tools.display().to_string())
-        .args([
-            "scan",
-            "--deep",
-            "--json",
-            "--no-trufflehog",
-            "--path",
-            root.to_str().unwrap(),
-        ])
-        .output()
-        .unwrap();
-    let report: serde_json::Value = serde_json::from_slice(&skipped.stdout).unwrap();
-    assert!(
-        report["engines"].as_array().map_or(true, |e| e.is_empty()),
-        "{report}"
-    );
-    assert!(!report["findings"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|f| f["engine"] == "trufflehog"));
-}
-
-/// A ustar entry, for the synthetic TruffleHog archive below.
-#[cfg(unix)]
-fn tar_entry(name: &str, data: &[u8], mode: &str) -> Vec<u8> {
-    let mut h = vec![0u8; 512];
-    h[..name.len()].copy_from_slice(name.as_bytes());
-    h[100..107].copy_from_slice(mode.as_bytes());
-    h[108..115].copy_from_slice(b"0000000");
-    h[116..123].copy_from_slice(b"0000000");
-    h[124..135].copy_from_slice(format!("{:011o}", data.len()).as_bytes());
-    h[136..147].copy_from_slice(b"00000000000");
-    h[156] = b'0';
-    h[257..262].copy_from_slice(b"ustar");
-    h[263..265].copy_from_slice(b"00");
-    for b in &mut h[148..156] {
-        *b = b' ';
-    }
-    let sum: u32 = h.iter().map(|&b| b as u32).sum();
-    h[148..154].copy_from_slice(format!("{:06o}", sum).as_bytes());
-    h[154] = 0;
-    h[155] = b' ';
-    let mut out = h;
-    out.extend_from_slice(data);
-    let pad = (512 - data.len() % 512) % 512;
-    out.extend(std::iter::repeat_n(0u8, pad));
-    out
-}
-
-#[cfg(unix)]
-#[test]
-fn engines_install_downloads_verifies_and_the_deep_scan_uses_it() {
-    // One click in the app is `gorse engines install trufflehog`: a single
-    // GET of the pinned archive, a checksum check, the executable kept under
-    // Gorse's folder, and the next deep scan runs it. A wrong checksum
-    // installs nothing.
-    use std::io::Write;
-    let home = TestHome::new();
-    let script = b"#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo 'trufflehog 9.9.9'; exit 0; fi\necho '{\"SourceMetadata\":{\"Data\":{\"Filesystem\":{\"file\":\"/x/app.env\",\"line\":1}}},\"DetectorName\":\"Stripe\",\"Verified\":false,\"Raw\":\"sk_live_RAW\",\"Redacted\":\"sk_live_****\"}'\n";
-    let mut tar = tar_entry("LICENSE", b"AGPL-3.0", "0000644");
-    tar.extend(tar_entry("trufflehog", script, "0000755"));
-    tar.extend(vec![0u8; 1024]);
-    let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
-    gz.write_all(&tar).unwrap();
-    let archive = gz.finish().unwrap();
-    let sha = {
-        use sha2::Digest;
-        format!("{:x}", sha2::Sha256::digest(&archive))
-    };
-
-    // Wrong checksum: refused, nothing installed.
-    let api = FakeApi::start();
-    let origin = api.origin();
-    let bytes = archive.clone();
-    let server = std::thread::spawn(move || {
-        api.serve_one_bytes(
-            std::time::Duration::from_secs(10),
-            200,
-            "application/gzip",
-            &bytes,
-        )
-    });
-    let out = home
-        .command()
-        .env("HEDGEHOG_TRUFFLEHOG_BASE_URL", format!("{origin}/"))
-        .env("HEDGEHOG_TRUFFLEHOG_SHA256", "0".repeat(64))
-        .args(["engines", "install", "trufflehog", "--json"])
-        .output()
-        .unwrap();
-    server
-        .join()
-        .unwrap()
-        .expect("the CLI must fetch the archive");
-    assert_eq!(out.status.code(), Some(2), "{out:?}");
-    let report: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert!(
-        report["error"]
-            .as_str()
-            .unwrap()
-            .contains("checksum mismatch"),
-        "{report}"
-    );
-    let status: serde_json::Value =
-        serde_json::from_slice(&run(&home, &["engines", "status", "--json"]).stdout).unwrap();
-    assert_eq!(status["trufflehog"]["managed"], false, "{status}");
-
-    // Right checksum: installed, status says so, the deep scan runs it.
-    let api = FakeApi::start();
-    let origin = api.origin();
-    let bytes = archive.clone();
-    let server = std::thread::spawn(move || {
-        api.serve_one_bytes(
-            std::time::Duration::from_secs(10),
-            200,
-            "application/gzip",
-            &bytes,
-        )
-    });
-    let out = home
-        .command()
-        .env("HEDGEHOG_TRUFFLEHOG_BASE_URL", format!("{origin}/"))
-        .env("HEDGEHOG_TRUFFLEHOG_SHA256", &sha)
-        .args(["engines", "install", "trufflehog", "--json", "--progress"])
-        .output()
-        .unwrap();
-    let (head, _) = server.join().unwrap().unwrap();
-    assert!(
-        head.contains("trufflehog_3.99.7_"),
-        "asks for the pinned release: {head}"
-    );
-    assert!(out.status.success(), "{out:?}");
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        stderr.contains("\"event\":\"download\""),
-        "progress lines: {stderr}"
-    );
-    let report: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert_eq!(report["installed"], "trufflehog", "{report}");
-    let status: serde_json::Value =
-        serde_json::from_slice(&run(&home, &["engines", "status", "--json"]).stdout).unwrap();
-    assert_eq!(status["trufflehog"]["managed"], true, "{status}");
-    assert_eq!(status["trufflehog"]["version"], "3.99.7");
-    let installed = std::path::PathBuf::from(status["trufflehog"]["path"].as_str().unwrap());
-    assert!(installed.is_file());
-    assert!(
-        installed
-            .parent()
-            .unwrap()
-            .join("TRUFFLEHOG-LICENSE")
-            .is_file(),
-        "the licence travels with the binary"
-    );
-
-    write_home(&home, "Documents/app.env", "x=1\n");
-    let root = home.root.join("home/Documents");
-    let scan = home
-        .command()
-        .env("PATH", "/nonexistent")
-        .args(["scan", "--deep", "--json", "--path", root.to_str().unwrap()])
-        .output()
-        .unwrap();
-    assert!(scan.status.success(), "{scan:?}");
-    let text = String::from_utf8_lossy(&scan.stdout).to_string();
-    assert!(!text.contains("sk_live_RAW"));
-    let report: serde_json::Value = serde_json::from_str(&text).unwrap();
-    assert_eq!(
-        report["engines"][0]["name"], "trufflehog",
-        "the managed copy is used even with an empty PATH: {text}"
-    );
-    assert!(report["findings"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|f| f["category"] == "Stripe (TruffleHog)"));
-
-    let removed: serde_json::Value =
-        serde_json::from_slice(&run(&home, &["engines", "remove", "trufflehog", "--json"]).stdout)
-            .unwrap();
-    assert_eq!(removed["removed"], true);
-    assert!(!installed.exists());
-}
-
 #[test]
 fn full_scan_requires_pro_licence() {
     // `scan --deep --all-dirs` (the whole home folder) is a Pro feature. The
@@ -1782,161 +1525,6 @@ fn exposure_verify_requires_pro_licence() {
     assert!(json.is_object());
     assert!(json["error"].as_str().unwrap().contains("Gorse Pro"));
     assert!(json.get("findings").is_none(), "no report is produced");
-}
-
-#[cfg(unix)]
-#[test]
-fn fast_scan_runs_trufflehog_over_known_locations_and_keeps_capabilities_unassessed() {
-    // With TruffleHog installed, the Fast Scan hands it the known credential
-    // locations that exist, verification off. A detection in a file Gorse
-    // already read (the AWS profile) is dropped because Gorse's own
-    // finding carries the reach. A detection Gorse has no adapter for (a
-    // Stripe key in a note under ~/.ssh) becomes a Low finding whose words
-    // say the vendor is recognised and the reach has not been assessed. The
-    // raw secret never appears, and --no-trufflehog skips the engine.
-    use std::os::unix::fs::PermissionsExt;
-    let home = TestHome::new();
-    write_home(
-        &home,
-        ".aws/credentials",
-        &format!("[default]\naws_access_key_id = AKIAIOSFODNN7EXAMPLE\naws_secret_access_key = {FIXTURE_AWS_SECRET}\n"),
-    );
-    write_home(
-        &home,
-        ".ssh/notes.txt",
-        "old stripe key for the staging shop\nsk_live_FIXTURERAWSECRET000000000000\n",
-    );
-    let home_dir = home.root.join("home");
-    let tools = home.root.join("tools");
-    fs::create_dir_all(&tools).unwrap();
-    let args_log = home.root.join("trufflehog-args.txt");
-    let script = format!(
-        concat!(
-            "#!/bin/sh\n",
-            "if [ \"$1\" = \"--version\" ]; then echo 'trufflehog 9.9.9'; exit 0; fi\n",
-            "echo \"$@\" > '{log}'\n",
-            "echo '{{\"SourceMetadata\":{{\"Data\":{{\"Filesystem\":{{\"file\":\"{home}/.aws/credentials\",\"line\":3}}}}}},\"DetectorName\":\"AWS\",\"Verified\":false,\"Raw\":\"{aws}\",\"Redacted\":\"AKIAIOSFODNN7EXAMPLE\"}}'\n",
-            "echo '{{\"SourceMetadata\":{{\"Data\":{{\"Filesystem\":{{\"file\":\"{home}/.ssh/notes.txt\",\"line\":2}}}}}},\"DetectorName\":\"Stripe\",\"DetectorDescription\":\"Stripe is a payment processing platform.\",\"Verified\":false,\"Raw\":\"sk_live_FIXTURERAWSECRET000000000000\",\"ExtraData\":{{\"rotation_guide\":\"https://howtorotate.com/docs/tutorials/stripe/\"}}}}'\n",
-        ),
-        log = args_log.display(),
-        home = home_dir.display(),
-        aws = FIXTURE_AWS_SECRET,
-    );
-    let bin = tools.join("trufflehog");
-    fs::write(&bin, script).unwrap();
-    fs::set_permissions(&bin, fs::Permissions::from_mode(0o755)).unwrap();
-
-    let mut command = exposure_command(&home);
-    command
-        .env_remove("HEDGEHOG_NO_TRUFFLEHOG")
-        .env("PATH", tools.display().to_string())
-        .args(["exposure", "--json", "--fail-on", "critical"]);
-    let output = command.output().unwrap();
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    assert_eq!(output.status.code(), Some(0), "{output:?}");
-    assert!(
-        !stdout.contains("FIXTURERAWSECRET") && !stdout.contains(FIXTURE_AWS_SECRET),
-        "a raw secret reached the report"
-    );
-    let json: serde_json::Value = serde_json::from_str(&stdout).unwrap();
-
-    let args = fs::read_to_string(&args_log).expect("the engine was run");
-    assert!(args.starts_with("filesystem "), "{args}");
-    assert!(args.contains("--no-verification"), "{args}");
-    assert!(
-        args.contains(&home_dir.join(".ssh").display().to_string()),
-        "the known ~/.ssh location was not handed to the engine: {args}"
-    );
-    assert!(
-        !args.contains(&home_dir.join("Documents").display().to_string()),
-        "the Fast Scan hands over known locations only: {args}"
-    );
-
-    let findings = json["findings"].as_array().unwrap();
-    let stripe = findings
-        .iter()
-        .find(|f| f["target"] == "Stripe")
-        .unwrap_or_else(|| panic!("no Stripe finding in {stdout}"));
-    assert_eq!(stripe["kind"], "ApiKey");
-    assert_eq!(stripe["name"], "Stripe in notes.txt");
-    assert_eq!(stripe["location"], "~/.ssh/notes.txt");
-    assert_eq!(stripe["severity"], "low");
-    assert_eq!(stripe["confidence"], "unknown");
-    let reasons = stripe["reasons"].to_string();
-    assert!(reasons.contains("has not been assessed"), "{reasons}");
-    let evidence = stripe["evidence"].to_string();
-    assert!(
-        evidence.contains("TruffleHog's Stripe detector at line 2")
-            && evidence.contains("nothing was sent")
-            && evidence.contains("howtorotate.com/docs/tutorials/stripe"),
-        "{evidence}"
-    );
-    assert!(
-        !findings.iter().any(|f| f["name"] == "AWS in credentials"),
-        "the AWS profile Gorse read itself must not be listed twice: {stdout}"
-    );
-    assert!(
-        findings.iter().any(|f| f["kind"] == "AwsAccessKey"),
-        "Gorse's own AWS finding is still there"
-    );
-    let engines = json["engines"].as_array().unwrap();
-    assert_eq!(engines.len(), 1);
-    assert_eq!(engines[0]["name"], "trufflehog");
-    assert_eq!(engines[0]["version"], "9.9.9");
-    assert_eq!(engines[0]["detections"], 2);
-    assert_eq!(engines[0]["added"], 1);
-    assert_eq!(engines[0]["verification"], "off");
-    assert!(engines[0]["locations"].as_u64().unwrap() >= 2);
-    let notes = json["notes"].to_string();
-    assert!(
-        notes.contains("TruffleHog 9.9.9 checked") && notes.contains("not the same as safe"),
-        "{notes}"
-    );
-
-    // Switched off: nothing runs, nothing is added, and the report says how
-    // to add the engine only when it is absent, not when it was declined.
-    fs::remove_file(&args_log).unwrap();
-    let mut command = exposure_command(&home);
-    command
-        .env_remove("HEDGEHOG_NO_TRUFFLEHOG")
-        .env("PATH", tools.display().to_string())
-        .args([
-            "exposure",
-            "--json",
-            "--no-trufflehog",
-            "--fail-on",
-            "critical",
-        ]);
-    let output = command.output().unwrap();
-    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert!(!args_log.exists(), "--no-trufflehog still ran the engine");
-    assert!(json["engines"].as_array().unwrap().is_empty());
-    assert!(!json["findings"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|f| f["target"] == "Stripe"));
-    assert!(!json["notes"].to_string().contains("TruffleHog"));
-}
-
-#[test]
-fn fast_scan_without_trufflehog_says_how_to_add_it() {
-    let home = TestHome::new();
-    let mut command = exposure_command(&home);
-    command
-        .env_remove("HEDGEHOG_NO_TRUFFLEHOG")
-        .env("PATH", home.root.join("empty-path").display().to_string())
-        .args(["exposure", "--json"]);
-    let output = command.output().unwrap();
-    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert!(json["engines"].as_array().unwrap().is_empty());
-    assert!(
-        json["notes"]
-            .to_string()
-            .contains("gorse engines install trufflehog"),
-        "{}",
-        json["notes"]
-    );
 }
 
 #[test]
@@ -3587,7 +3175,7 @@ fn license_refresh_honours_loopback_api_origin_and_sends_nothing_without_a_lease
         .unwrap_or_else(|error| panic!("invalid JSON: {error}; output: {output:?}"));
     let error = report["error"].as_str().unwrap_or_default();
     assert!(
-        error.contains("No stored lease") || error.contains("qualified only on macOS"),
+        error.contains("No stored lease") || error.contains("Gorse Pro runs on macOS for now"),
         "unexpected error: {error}"
     );
     // macOS reports a missing lease; other platforms report that the paid

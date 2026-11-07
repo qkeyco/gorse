@@ -22,7 +22,7 @@ detected without being verified.
 
 | State | Register field | Where in the code | What it means |
 |---|---|---|---|
-| **present** | `watched` | `SecretDetector::add_user_home` in `taint_engine/src/secrets.rs` | The location is on the list. `hedgehog status` and `scan --all` report whether it exists on this computer, and the Fast Scan hands it to TruffleHog if that engine is installed. Nothing has interpreted the file. `["all"]` or a list of platforms |
+| **present** | `watched` | `SecretDetector::add_user_home` in `taint_engine/src/secrets.rs` | The location is on the list. `hedgehog status` and `scan --all` report whether it exists on this computer. Nothing has interpreted the file. `["all"]` or a list of platforms |
 | **detected** | `discovered` | `hedgehog-cli/src/exposure/discover.rs` | A Fast Scan adapter opens and parses the file into a credential: what it is, which account or host it belongs to, and what it is inferred to reach |
 | **verified** | (none yet; see below) | `hedgehog-cli/src/exposure/verify.rs` | A read-only provider query exists for the credential, so with Pro Verify the inferred reach can be confirmed by the provider. Some queries only confirm identity, and the reach stays inferred; the verify step's note says which |
 | **protected** | `guarded` | filename rules in `taint_engine/src/secrets.rs`; system paths in `hedgehog-linux/src/secrets.rs` | Agent guard rules exist: a read of it taints the process. Used for name patterns (`.kdbx`, `.ovpn`, `.pfx`, `credentials.xml`) that cannot be reported present without a walk, and for Linux system files such as `/etc/shadow`. A list of platforms |
@@ -47,7 +47,7 @@ browser password stores are not read either: they are encrypted at rest, so
 reading them would mean decrypting the user's passwords, which is not what a
 read-only exposure check should do. These stores may be `present` on the
 watch list so that access to them is noticed by the agent guard, but the
-Fast Scan never opens them and TruffleHog is never run over them. Browser
+Fast Scan never opens them and no pattern detector is run over them. Browser
 profiles are read only for the presence of wallet extensions.
 
 The distinction between `watched` and `guarded` matters. On 2026-11-01 the
@@ -71,7 +71,7 @@ Every entry cites at least one source of one of these kinds:
 | `framework` | MITRE ATT&CK T1552 (Unsecured Credentials) and sub-techniques | Paths defenders are expected to monitor |
 | `infostealer-analysis` | Published analyses of macOS and Windows stealers (AMOS, Banshee, Poseidon, RedLine, Lumma, Vidar and others) | What attackers actually collect from a compromised laptop |
 | `incident` | Supply-chain compromises that harvested developer credentials (npm, PyPI and CI worms) | What developer-targeted malware went for in practice |
-| `scanner` | TruffleHog, Gitleaks, Nosey Parker, detect-secrets docs | Patterns and locations scanners expect |
+| `scanner` | Gitleaks, Nosey Parker, detect-secrets and other public scanner docs | Patterns and locations scanners expect |
 | `audit-guidance` | CIS, NIST, Elastic and Microsoft detection rules naming credential files | Paths an audit would expect us to cover |
 
 Infostealer analyses are the most important of these. A location that
@@ -108,9 +108,8 @@ from the privacy reason, detectors over ciphertext produce junk.
    when the path is the same under every home directory, otherwise the
    platform table) with a priority and a one-line description, since the
    description is what the report shows. A directory entry guards everything
-   beneath it. Keep large binary trees (browser profiles, wallets) out of the
-   TruffleHog pass by naming them in `is_opaque_store` in
-   `hedgehog-cli/src/exposure/mod.rs`. If the Fast Scan should understand the
+   beneath it. Large binary trees (browser profiles, wallets) are watched for
+   presence only and never read by a pattern detector. If the Fast Scan should understand the
    credential, write or extend a discovery adapter in `discover.rs` and, for
    Pro verification, a verify step in `verify.rs`.
 4. Set `watched` (present), `guarded` (protected) or `discovered` (detected)

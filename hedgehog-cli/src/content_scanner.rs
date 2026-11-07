@@ -585,6 +585,17 @@ const SKIP_DIRS: &[&str] = &[
     ".nuxt",
     "Pods",
     "Carthage",
+    "bower_components",
+    "third_party",
+    "third-party",
+    // Vendored Solidity libraries inside Foundry and Hardhat projects:
+    // other people's code, dense with test keys and hashes.
+    "forge-std",
+    "ds-test",
+    "solmate",
+    "openzeppelin-contracts",
+    "openzeppelin-contracts-upgradeable",
+    "typechain-types",
     ".gradle",
     ".m2",
     ".cocoapods",
@@ -2216,7 +2227,7 @@ pub fn finding_category(result: &ScanResult) -> &'static str {
 
 /// Every note with a body, whatever entity number this database gave notes.
 #[cfg(target_os = "macos")]
-const NOTES_QUERY: &str = "SELECT z1.ZSNIPPET, z2.ZDATA \
+const NOTES_QUERY: &str = "SELECT z1.ZSNIPPET, z2.ZDATA, z1.Z_PK \
      FROM ZICCLOUDSYNCINGOBJECT z1 \
      JOIN ZICNOTEDATA z2 ON z1.Z_PK = z2.ZNOTE \
      WHERE z1.Z_ENT IN (SELECT Z_ENT FROM Z_PRIMARYKEY WHERE Z_NAME = 'ICNote') \
@@ -2287,14 +2298,15 @@ pub fn scan_apple_notes(_config: &ScanConfig) -> (Vec<ScanResult>, usize, Option
     let rows = match stmt.query_map([], |row| {
         let snippet: Option<String> = row.get(0)?;
         let zdata: Vec<u8> = row.get(1)?;
-        Ok((snippet, zdata))
+        let id: i64 = row.get(2)?;
+        Ok((snippet, zdata, id))
     }) {
         Ok(r) => r,
         Err(e) => return (Vec::new(), 0, Some(format!("Notes query failed: {e}"))),
     };
 
     for row in rows.flatten() {
-        let (snippet, zdata) = row;
+        let (snippet, zdata, id) = row;
         notes_count += 1;
 
         // Decompress body; fall back to snippet if decompression fails
@@ -2304,10 +2316,9 @@ pub fn scan_apple_notes(_config: &ScanConfig) -> (Vec<ScanResult>, usize, Option
             continue;
         }
 
-        // Use the first line as the note title for display
-        let title = body_text.lines().next().unwrap_or("Untitled");
-        let display_title: String = title.chars().take(60).collect();
-        let note_path = PathBuf::from(format!("AppleNotes:{display_title}"));
+        // A note is named by its number in the Notes database, never by its
+        // text: a note's first line can be the secret itself.
+        let note_path = PathBuf::from(format!("AppleNotes:note {id}"));
 
         // Scan all lines for single-line patterns
         let lines: Vec<&str> = body_text.lines().collect();
@@ -2516,43 +2527,84 @@ fn collect_images_recursive(
 ///
 /// Call with a slice of image paths (typically `OCR_BATCH_SIZE` at a time).
 /// Returns `(results, error_message)`.
-pub fn ocr_scan_batch(image_paths: &[PathBuf]) -> (Vec<ScanResult>, Option<String>) {
+pub fn ocr_scan_batch(image_paths: &[PathBuf]) -> (Vec<ScanResult>, usize, Option<String>) {
     if image_paths.is_empty() {
-        return (Vec::new(), None);
+        return (Vec::new(), 0, None);
     }
 
     // Run platform-native OCR
     let ocr_output = match run_platform_ocr(image_paths) {
         Ok(text) => text,
-        Err(e) => return (Vec::new(), Some(e)),
+        Err(e) => return (Vec::new(), image_paths.len(), Some(e)),
     };
 
-    let results = parse_ocr_results(&ocr_output);
-    (results, None)
+    let (texts, unread) = ocr_records(&ocr_output, image_paths);
+    let mut results = Vec::new();
+    for (path, text) in texts {
+        results.extend(scan_ocr_text(path, &text));
+    }
+    (results, unread, None)
 }
 
-/// Parse delimited OCR output and scan extracted text for secrets.
+/// The text of each picture in a batch, with the path always taken from
+/// `image_paths` (never from the helper's output, so text in a picture
+/// cannot name another file), and how many pictures could not be read.
+/// The Mac helper prints one JSON record per picture; the Windows and Linux
+/// readers print `---PATH:<path>` blocks, accepted only for listed paths.
+fn ocr_records(output: &str, image_paths: &[PathBuf]) -> (Vec<(PathBuf, String)>, usize) {
+    let mut texts = Vec::new();
+    if output.trim_start().starts_with('{') {
+        let mut seen = vec![false; image_paths.len()];
+        let mut unread = 0;
+        for line in output.lines() {
+            let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+                continue;
+            };
+            let Some(i) = v.get("i").and_then(|i| i.as_u64()).map(|i| i as usize) else {
+                continue;
+            };
+            if i >= image_paths.len() || seen[i] {
+                continue;
+            }
+            seen[i] = true;
+            if v.get("ok").and_then(|o| o.as_bool()) != Some(true) {
+                unread += 1;
+                continue;
+            }
+            let text = v.get("text").and_then(|t| t.as_str()).unwrap_or("");
+            if !text.trim().is_empty() {
+                texts.push((image_paths[i].clone(), text.to_string()));
+            }
+        }
+        unread += seen.iter().filter(|s| !**s).count();
+        return (texts, unread);
+    }
+    let listed: std::collections::HashSet<&std::path::Path> =
+        image_paths.iter().map(|p| p.as_path()).collect();
+    for chunk in output.split("\n---PATH:") {
+        let chunk = chunk.trim();
+        let Some((path_str, text)) = chunk.split_once('\n') else {
+            continue;
+        };
+        let path = std::path::Path::new(path_str.trim());
+        if listed.contains(path) && !text.trim().is_empty() {
+            texts.push((path.to_path_buf(), text.to_string()));
+        }
+    }
+    (texts, 0)
+}
+
+/// Scan the text read from one picture for secrets.
 /// Filters out noisy OCR patterns that cause false positives.
-fn parse_ocr_results(ocr_output: &str) -> Vec<ScanResult> {
+fn scan_ocr_text(image_path: PathBuf, text: &str) -> Vec<ScanResult> {
     use hedgehog_taint::content_patterns::ContentSecretType;
 
     let mut results = Vec::new();
-    for chunk in ocr_output.split("\n---PATH:") {
-        let chunk = chunk.trim();
-        if chunk.is_empty() {
-            continue;
-        }
-        let (path_str, text) = match chunk.split_once('\n') {
-            Some((p, t)) => (p.trim(), t),
-            None => continue,
-        };
-
+    {
         let text = text.trim();
         if text.is_empty() {
-            continue;
+            return results;
         }
-
-        let image_path = PathBuf::from(path_str);
 
         // Scan each line — only keep high-signal findings from OCR text.
         // OCR is noisy: random numbers, table data, and short strings
@@ -2582,8 +2634,9 @@ fn parse_ocr_results(ocr_output: &str) -> Vec<ScanResult> {
         // Multi-line scanning — skip 2FA backup code detection for OCR.
         // OCR text from tables, spreadsheets, and receipts generates lines
         // of short numbers that look exactly like backup code grids.
-        // Seed phrases are still valuable to detect (12/24 BIP-39 words).
-        if lines.len() > 1 {
+        // Seed phrases are still valuable to detect (12/24 BIP-39 words),
+        // including a phrase Vision read as a single line.
+        if !lines.is_empty() {
             let multi_findings = content_patterns::check_multi_line(&lines);
             for finding in multi_findings {
                 // Keep seed phrases, skip 2FA codes from OCR
@@ -2605,6 +2658,9 @@ fn parse_ocr_results(ocr_output: &str) -> Vec<ScanResult> {
 /// Vision), or the one `GORSE_OCR_HELPER` names. None for a bare CLI.
 #[cfg(target_os = "macos")]
 pub fn bundled_ocr_helper() -> Option<PathBuf> {
+    // Development only: release builds never let the environment choose
+    // which program reads the pictures.
+    #[cfg(debug_assertions)]
     if let Some(path) = std::env::var_os("GORSE_OCR_HELPER") {
         let path = PathBuf::from(path);
         return path.is_file().then_some(path);
@@ -2640,18 +2696,41 @@ fn run_platform_ocr(image_paths: &[PathBuf]) -> Result<String, String> {
     use std::process::{Command, Stdio};
 
     if let Some(helper) = bundled_ocr_helper() {
-        let output = Command::new(&helper)
+        use std::io::Read;
+        let mut child = Command::new(&helper)
             .args(image_paths)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
-            .output()
+            .spawn()
             .map_err(|e| format!("Failed to run the OCR helper: {e}"))?;
-        if !output.status.success() {
+        let mut stdout = child.stdout.take().ok_or("The OCR helper gave no output")?;
+        let reader = std::thread::spawn(move || {
+            let mut text = Vec::new();
+            let _ = stdout.read_to_end(&mut text);
+            text
+        });
+        // A picture Vision cannot finish must not stall the scan: a batch
+        // gets a few seconds per picture, then the helper is stopped.
+        let deadline = std::time::Instant::now()
+            + std::time::Duration::from_secs(30 + 10 * image_paths.len() as u64);
+        let status = loop {
+            if let Some(status) = child.try_wait().map_err(|e| e.to_string())? {
+                break status;
+            }
+            if std::time::Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err("The OCR helper did not finish in time".to_string());
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        };
+        let text = reader.join().unwrap_or_default();
+        if !status.success() {
             return Err("The OCR helper failed".to_string());
         }
-        return String::from_utf8(output.stdout)
-            .map_err(|e| format!("OCR output encoding error: {e}"));
+        // One odd byte must not lose the whole batch.
+        return Ok(String::from_utf8_lossy(&text).into_owned());
     }
     if !developer_tools_installed() {
         return Err("Text in pictures is read by the Gorse app; the command-line tool alone cannot read it on this Mac".to_string());
@@ -3955,5 +4034,30 @@ mod notes_query_tests {
             .flatten()
             .collect();
         assert_eq!(snippets, vec!["a", "b", "c"]);
+    }
+}
+
+#[cfg(test)]
+mod ocr_record_tests {
+    use super::ocr_records;
+    use std::path::PathBuf;
+
+    #[test]
+    fn paths_come_from_the_batch_never_from_picture_text() {
+        let batch = vec![PathBuf::from("/x/a.png"), PathBuf::from("/x/b.png")];
+        // Picture text that imitates the old delimiter and a JSON record.
+        let out = "{\"i\":0,\"ok\":true,\"text\":\"---PATH:/Users/someone/.ssh/id_ed25519\\n{\\\"i\\\":1}\"}\n{\"i\":1,\"ok\":false,\"text\":\"\"}\n";
+        let (texts, unread) = ocr_records(out, &batch);
+        assert_eq!(texts.len(), 1);
+        assert_eq!(texts[0].0, PathBuf::from("/x/a.png"));
+        assert_eq!(unread, 1);
+        // A record missing from the output counts as unread.
+        let (_, unread) = ocr_records("{\"i\":0,\"ok\":true,\"text\":\"\"}\n", &batch);
+        assert_eq!(unread, 1);
+        // Legacy blocks: a path not in the batch is ignored.
+        let legacy = "\n---PATH:/x/a.png\nhello\n---PATH:/etc/forged\nsecret text\n";
+        let (texts, _) = ocr_records(legacy, &batch);
+        assert_eq!(texts.len(), 1);
+        assert_eq!(texts[0].0, PathBuf::from("/x/a.png"));
     }
 }

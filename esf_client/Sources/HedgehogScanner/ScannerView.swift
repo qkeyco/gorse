@@ -35,7 +35,6 @@ private struct FolderPane: View {
     @ObservedObject var model: ScannerModel
     #if HEDGEHOG_DESKTOP
     @EnvironmentObject var license: LicenseModel
-    @EnvironmentObject var engines: EngineModel
     #endif
 
     private var proAvailable: Bool {
@@ -143,9 +142,6 @@ private struct FolderPane: View {
                     Text("To scan another folder as well, click Add. If Apple Notes could not be read, give Gorse Full Disk Access in System Settings, Privacy & Security.")
                         .font(.caption2)
                         .foregroundStyle(.tertiary)
-                    #if HEDGEHOG_DESKTOP
-                    EngineCard(model: engines)
-                    #endif
                 }
                 .padding(14)
                 .frame(maxWidth: .infinity, alignment: .topLeading)
@@ -347,9 +343,6 @@ private struct ResultsPane: View {
         if report.interrupted { text += " (stopped early)" }
         if let n = report.coverage?.notes_read {
             text += n == 1 ? " · 1 Apple Note read" : " · \(n.formatted()) Apple Notes read"
-        }
-        if let th = report.engines?.first(where: { $0.name == "trufflehog" }) {
-            text += th.error == nil ? " · with TruffleHog \(th.version ?? "")" : " · TruffleHog failed"
         }
         if case .gaps = report.coverageState { text += " · some files not checked" }
         if let date = model.lastScanDate {

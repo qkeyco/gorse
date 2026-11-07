@@ -144,7 +144,6 @@ final class ScannerModel: ObservableObject {
         case nil: return nil
         case "notes": return "Reading Apple Notes…"
         case "images": return imagesKnown ? nil : "Reading the text inside pictures…"
-        case "trufflehog": return "Running TruffleHog's detectors…"
         default: return "Finishing…"
         }
     }
@@ -423,8 +422,7 @@ final class ScannerModel: ObservableObject {
             interrupted = interrupted || r.interrupted
             if let c = r.coverage { merged = merged.map { $0.merging(c) } ?? c }
         }
-        let engines = Array(Set(parts.flatMap { $0.engines ?? [] }))
-        report = ScanReport(findings: findings, total: total, files_scanned: files, elapsed_secs: elapsed, interrupted: interrupted, engines: engines.isEmpty ? nil : engines, coverage: merged)
+        report = ScanReport(findings: findings, total: total, files_scanned: files, elapsed_secs: elapsed, interrupted: interrupted, coverage: merged)
     }
 
     func clearResults() {

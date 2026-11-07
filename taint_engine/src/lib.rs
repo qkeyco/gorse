@@ -31,6 +31,7 @@ pub mod localhost;
 pub mod logger;
 pub mod process_tree;
 pub mod project;
+pub mod rules;
 pub mod secret_providers;
 pub mod secrets;
 pub mod taint;

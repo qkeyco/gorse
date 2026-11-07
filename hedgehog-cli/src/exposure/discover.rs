@@ -214,7 +214,29 @@ impl<'a> Context<'a> {
     }
 
     fn read(&mut self, p: &Path) -> Option<String> {
-        match std::fs::read_to_string(p) {
+        // Only ordinary files, and only up to a size no credential file
+        // reaches: a named pipe would block for ever and a device or huge
+        // file would exhaust memory. Both are recorded as lost coverage.
+        const MAX_BYTES: u64 = 8 * 1024 * 1024;
+        match std::fs::metadata(p) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
+            Ok(m) if m.is_dir() => return None,
+            Ok(m) if !m.is_file() => {
+                self.coverage_failure(p, "not an ordinary file; skipped".to_string());
+                return None;
+            }
+            Ok(m) if m.len() > MAX_BYTES => {
+                self.coverage_failure(p, "larger than 8 MB; skipped".to_string());
+                return None;
+            }
+            _ => {}
+        }
+        let read = std::fs::File::open(p).and_then(|f| {
+            use std::io::Read;
+            let mut text = String::new();
+            f.take(MAX_BYTES).read_to_string(&mut text).map(|_| text)
+        });
+        match read {
             Ok(s) => Some(s),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
             Err(e) => {
@@ -284,9 +306,6 @@ pub const SOURCES: &[Source] = &[
     ("project-env-files", project_env_files),
 ];
 
-/// The source id of the optional TruffleHog engine.
-pub const TRUFFLEHOG_SOURCE: &str = "trufflehog";
-
 /// What one discovery run covered: the procedures that ran to completion
 /// and those that did not, with why. A procedure that hit a coverage
 /// failure (a known file it could not read or interpret) is unavailable,
@@ -295,15 +314,6 @@ pub const TRUFFLEHOG_SOURCE: &str = "trufflehog";
 pub struct SourceCoverage {
     pub assessed: Vec<String>,
     pub unavailable: Vec<(String, String)>,
-}
-
-impl SourceCoverage {
-    pub fn mark_unavailable(&mut self, id: &str, reason: String) {
-        self.assessed.retain(|a| a != id);
-        if !self.unavailable.iter().any(|(u, _)| u == id) {
-            self.unavailable.push((id.to_string(), reason));
-        }
-    }
 }
 
 /// Run every discovery source. Each finding is paired with the id of the
@@ -1011,7 +1021,7 @@ fn azure(ctx: &mut Context) -> Vec<Discovered> {
             // Display names are not unique; the id is what binds the check.
             let label = format!("{name} ({id})");
             let mut c = DiscoveredCredential::new(kind, &label, &ctx.display(&profile), "Azure");
-            c.permissions.identity = Some(user.to_string());
+            c.permissions.identity = Some(safe_identity(user));
             c.permissions.organization = sub["tenantId"].as_str().map(|t| format!("tenant {t}"));
             c.permissions.automated = if kind == CredentialKind::AzureServicePrincipal {
                 Capability::Yes
@@ -1249,7 +1259,7 @@ fn github(ctx: &mut Context) -> Vec<Discovered> {
                 &ctx.display(&hosts),
                 host,
             );
-            c.permissions.identity = Some(user.clone());
+            c.permissions.identity = Some(safe_identity(&user));
             c.permissions.automated = Capability::No;
             c.permissions.assurance = Assurance::Inferred;
             match token {
@@ -1324,16 +1334,21 @@ fn github(ctx: &mut Context) -> Vec<Discovered> {
                 .split('@')
                 .last()
                 .unwrap_or("?")
+                .trim_start_matches("https://")
+                .trim_start_matches("http://")
                 .split('/')
                 .next()
-                .unwrap_or("?")
-                .to_string();
+                .map(safe_host)
+                .unwrap_or_else(|| "?".to_string());
+            // The user is what sits before ':' inside the part before '@'.
+            // GitHub's own helper may store the token there instead.
             let user = line
                 .split("//")
                 .nth(1)
-                .and_then(|r| r.split(':').next())
-                .unwrap_or("?")
-                .to_string();
+                .and_then(|r| r.split('@').next())
+                .and_then(|u| u.split(':').next())
+                .map(safe_identity)
+                .unwrap_or_else(|| "?".to_string());
             let mut c = DiscoveredCredential::new(
                 CredentialKind::GitHubToken,
                 &format!("git credential {host}"),
@@ -1485,6 +1500,15 @@ fn other_ci(ctx: &mut Context) -> Vec<Discovered> {
             token_key: "_token",
         },
         Src {
+            rel: "AppData/Roaming/xdg.config/.wrangler/config/default.toml",
+            name: "Cloudflare Wrangler",
+            target: "Cloudflare",
+            kind: CredentialKind::CiToken,
+            edge: EdgeKind::CanDeploy,
+            node: NodeKind::ProductionService,
+            token_key: "_token",
+        },
+        Src {
             rel: "Library/Preferences/.wrangler/config/default.toml",
             name: "Cloudflare Wrangler",
             target: "Cloudflare",
@@ -1627,21 +1651,24 @@ fn other_ci(ctx: &mut Context) -> Vec<Discovered> {
         }
         for entry in entries {
             if !entry.well_formed {
-                ctx.could_not_interpret_entry(&netrc, &format!("machine {}", entry.machine));
+                ctx.could_not_interpret_entry(
+                    &netrc,
+                    &format!("machine {}", safe_host(&entry.machine)),
+                );
                 continue;
             }
             // The default entry was never reported; it names no host.
             if entry.machine == "default" {
                 continue;
             }
-            let m = &entry.machine;
+            let m = &safe_host(&entry.machine);
             let mut c = DiscoveredCredential::new(
                 CredentialKind::ApiKey,
                 &format!("netrc {m}"),
                 &ctx.display(&netrc),
                 m,
             );
-            c.permissions.identity = entry.login.clone();
+            c.permissions.identity = entry.login.as_deref().map(safe_identity);
             c.fingerprint = Fingerprint::from_secret(m.as_bytes());
             c.permissions.lifetime = Lifetime::Unknown;
             c.persistence = Persistence::IndependentCredential;
@@ -1731,31 +1758,388 @@ const fn agent(
 /// paths on macOS and Linux; on Windows the CLIs use the same folders
 /// under %USERPROFILE%.
 #[rustfmt::skip]
+/// An identity read from a credential file, made safe to show. Some tools
+/// put the token itself where a user name goes (`https://ghp_…@github.com`
+/// in ~/.git-credentials, a token as the .netrc login), so anything that
+/// looks like a secret is cut to four characters, as previews are.
+pub(crate) fn safe_identity(raw: &str) -> String {
+    let s = raw.trim();
+    let redacted = redact_text(s);
+    let long_random = s.len() >= 20
+        && !s.contains(['@', ' '])
+        && s.chars().any(|c| c.is_ascii_digit())
+        && s.chars().any(|c| c.is_ascii_alphabetic());
+    if redacted != s || long_random {
+        let head: String = s.chars().take(4).collect();
+        return format!("{head}****");
+    }
+    s.to_string()
+}
+
+/// True when a config key name is built only from ordinary words
+/// (`OPENAI_API_KEY`, `accessToken`, `client_secret`), so it cannot be a
+/// secret written where a name goes.
+fn plain_key_name(name: &str) -> bool {
+    const WORDS: &[&str] = &[
+        "api",
+        "key",
+        "keys",
+        "token",
+        "tokens",
+        "secret",
+        "secrets",
+        "access",
+        "refresh",
+        "id",
+        "client",
+        "password",
+        "passwd",
+        "pass",
+        "auth",
+        "authorization",
+        "bearer",
+        "oauth",
+        "session",
+        "private",
+        "personal",
+        "app",
+        "bot",
+        "user",
+        "service",
+        "account",
+        "env",
+        "openai",
+        "anthropic",
+        "claude",
+        "gemini",
+        "google",
+        "github",
+        "gitlab",
+        "aws",
+        "azure",
+        "mistral",
+        "groq",
+        "cohere",
+        "deepseek",
+        "openrouter",
+        "together",
+        "perplexity",
+        "xai",
+        "huggingface",
+        "hf",
+        "slack",
+        "linear",
+        "notion",
+        "stripe",
+        "supabase",
+        "vercel",
+        "cloudflare",
+        "brave",
+        "search",
+        "tavily",
+        "exa",
+        "firecrawl",
+        "sentry",
+        "figma",
+        "jira",
+        "atlassian",
+        "confluence",
+        "postgres",
+        "database",
+        "db",
+        "url",
+        "mcp",
+        "server",
+        "x",
+        "header",
+        "headers",
+        "copilot",
+        "cursor",
+        "codex",
+        "ollama",
+        "voyage",
+        "replicate",
+        "fireworks",
+        "pinecone",
+        "weaviate",
+        "qdrant",
+        "redis",
+        "mongodb",
+        "mongo",
+        "neon",
+    ];
+    if name.is_empty() || name.len() > 48 {
+        return false;
+    }
+    let mut parts: Vec<String> = Vec::new();
+    for chunk in name.split(['_', '-', '.']) {
+        let mut cur = String::new();
+        for ch in chunk.chars() {
+            if ch.is_ascii_uppercase() && cur.chars().last().is_some_and(|c| c.is_ascii_lowercase())
+            {
+                parts.push(std::mem::take(&mut cur));
+            }
+            cur.push(ch);
+        }
+        if !cur.is_empty() {
+            parts.push(cur);
+        }
+    }
+    !parts.is_empty()
+        && parts
+            .iter()
+            .all(|p| WORDS.contains(&p.to_ascii_lowercase().as_str()))
+}
+
+/// A host name read from a file, shown only when it looks like one.
+fn safe_host(raw: &str) -> String {
+    let s = raw.trim();
+    if s.contains('.')
+        && s.len() <= 253
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | ':'))
+    {
+        s.to_string()
+    } else {
+        safe_identity(s)
+    }
+}
+
 const AGENT_FILES: &[AgentFile] = &[
-    agent(".claude/.credentials.json", "Claude Code sign-in", "Anthropic (Claude)", CredentialKind::OAuthSession, AgentFormat::Json, true),
-    agent(".claude.json", "Claude Code config", "Anthropic (Claude)", CredentialKind::ApiKey, AgentFormat::Json, false),
-    agent(".claude/settings.json", "Claude Code settings", "Anthropic (Claude)", CredentialKind::ApiKey, AgentFormat::Json, false),
-    agent(".gemini/oauth_creds.json", "Gemini CLI sign-in", "Google (Gemini)", CredentialKind::OAuthSession, AgentFormat::Json, true),
-    agent(".gemini/mcp-oauth-tokens.json", "Gemini CLI MCP sign-ins", "MCP servers", CredentialKind::OAuthSession, AgentFormat::Json, false),
-    agent(".gemini/settings.json", "Gemini CLI settings", "MCP servers", CredentialKind::ApiKey, AgentFormat::Json, false),
-    agent(".codex/auth.json", "Codex CLI sign-in", "OpenAI", CredentialKind::OAuthSession, AgentFormat::Json, true),
-    agent(".codex/config.toml", "Codex CLI config", "MCP servers", CredentialKind::ApiKey, AgentFormat::Lines, false),
-    agent(".cursor/auth.json", "Cursor CLI sign-in", "Cursor", CredentialKind::OAuthSession, AgentFormat::Json, true),
-    agent(".cursor/mcp.json", "Cursor MCP config", "MCP servers", CredentialKind::ApiKey, AgentFormat::Json, false),
-    agent(".qwen/oauth_creds.json", "Qwen Code sign-in", "Qwen", CredentialKind::OAuthSession, AgentFormat::Json, true),
-    agent(".local/share/opencode/auth.json", "OpenCode sign-in", "AI model providers", CredentialKind::OAuthSession, AgentFormat::Json, true),
-    agent(".config/github-copilot/hosts.json", "GitHub Copilot sign-in", "GitHub Copilot", CredentialKind::OAuthSession, AgentFormat::Json, true),
-    agent(".config/github-copilot/apps.json", "GitHub Copilot sign-in", "GitHub Copilot", CredentialKind::OAuthSession, AgentFormat::Json, true),
-    agent("Library/Application Support/Claude/claude_desktop_config.json", "Claude Desktop MCP config", "MCP servers", CredentialKind::ApiKey, AgentFormat::Json, false),
-    agent(".config/Claude/claude_desktop_config.json", "Claude Desktop MCP config", "MCP servers", CredentialKind::ApiKey, AgentFormat::Json, false),
-    agent("Library/Application Support/Code/User/mcp.json", "VS Code MCP config", "MCP servers", CredentialKind::ApiKey, AgentFormat::Json, false),
-    agent(".config/Code/User/mcp.json", "VS Code MCP config", "MCP servers", CredentialKind::ApiKey, AgentFormat::Json, false),
-    agent(".codeium/windsurf/mcp_config.json", "Windsurf MCP config", "MCP servers", CredentialKind::ApiKey, AgentFormat::Json, false),
-    agent(".config/devin/mcp_config.json", "Devin MCP config", "MCP servers", CredentialKind::ApiKey, AgentFormat::Json, false),
-    agent(".continue/config.yaml", "Continue config", "AI model providers", CredentialKind::ApiKey, AgentFormat::Lines, false),
-    agent(".aider.conf.yml", "Aider config", "AI model providers", CredentialKind::ApiKey, AgentFormat::Lines, false),
-    agent(".cache/huggingface/token", "Hugging Face token", "Hugging Face", CredentialKind::ApiKey, AgentFormat::Raw, true),
-    agent(".huggingface/token", "Hugging Face token", "Hugging Face", CredentialKind::ApiKey, AgentFormat::Raw, true),
+    agent(
+        ".claude/.credentials.json",
+        "Claude Code sign-in",
+        "Anthropic (Claude)",
+        CredentialKind::OAuthSession,
+        AgentFormat::Json,
+        true,
+    ),
+    agent(
+        ".claude.json",
+        "Claude Code config",
+        "Anthropic (Claude)",
+        CredentialKind::ApiKey,
+        AgentFormat::Json,
+        false,
+    ),
+    agent(
+        ".claude/settings.json",
+        "Claude Code settings",
+        "Anthropic (Claude)",
+        CredentialKind::ApiKey,
+        AgentFormat::Json,
+        false,
+    ),
+    agent(
+        ".gemini/oauth_creds.json",
+        "Gemini CLI sign-in",
+        "Google (Gemini)",
+        CredentialKind::OAuthSession,
+        AgentFormat::Json,
+        true,
+    ),
+    agent(
+        ".gemini/mcp-oauth-tokens.json",
+        "Gemini CLI MCP sign-ins",
+        "MCP servers",
+        CredentialKind::OAuthSession,
+        AgentFormat::Json,
+        false,
+    ),
+    agent(
+        ".gemini/settings.json",
+        "Gemini CLI settings",
+        "MCP servers",
+        CredentialKind::ApiKey,
+        AgentFormat::Json,
+        false,
+    ),
+    agent(
+        ".codex/auth.json",
+        "Codex CLI sign-in",
+        "OpenAI",
+        CredentialKind::OAuthSession,
+        AgentFormat::Json,
+        true,
+    ),
+    agent(
+        ".codex/config.toml",
+        "Codex CLI config",
+        "MCP servers",
+        CredentialKind::ApiKey,
+        AgentFormat::Lines,
+        false,
+    ),
+    agent(
+        ".cursor/auth.json",
+        "Cursor CLI sign-in",
+        "Cursor",
+        CredentialKind::OAuthSession,
+        AgentFormat::Json,
+        true,
+    ),
+    agent(
+        ".cursor/mcp.json",
+        "Cursor MCP config",
+        "MCP servers",
+        CredentialKind::ApiKey,
+        AgentFormat::Json,
+        false,
+    ),
+    agent(
+        ".qwen/oauth_creds.json",
+        "Qwen Code sign-in",
+        "Qwen",
+        CredentialKind::OAuthSession,
+        AgentFormat::Json,
+        true,
+    ),
+    agent(
+        ".local/share/opencode/auth.json",
+        "OpenCode sign-in",
+        "AI model providers",
+        CredentialKind::OAuthSession,
+        AgentFormat::Json,
+        true,
+    ),
+    agent(
+        ".config/github-copilot/hosts.json",
+        "GitHub Copilot sign-in",
+        "GitHub Copilot",
+        CredentialKind::OAuthSession,
+        AgentFormat::Json,
+        true,
+    ),
+    agent(
+        ".config/github-copilot/apps.json",
+        "GitHub Copilot sign-in",
+        "GitHub Copilot",
+        CredentialKind::OAuthSession,
+        AgentFormat::Json,
+        true,
+    ),
+    agent(
+        "Library/Application Support/Claude/claude_desktop_config.json",
+        "Claude Desktop MCP config",
+        "MCP servers",
+        CredentialKind::ApiKey,
+        AgentFormat::Json,
+        false,
+    ),
+    agent(
+        ".config/Claude/claude_desktop_config.json",
+        "Claude Desktop MCP config",
+        "MCP servers",
+        CredentialKind::ApiKey,
+        AgentFormat::Json,
+        false,
+    ),
+    agent(
+        "Library/Application Support/Code/User/mcp.json",
+        "VS Code MCP config",
+        "MCP servers",
+        CredentialKind::ApiKey,
+        AgentFormat::Json,
+        false,
+    ),
+    agent(
+        ".config/Code/User/mcp.json",
+        "VS Code MCP config",
+        "MCP servers",
+        CredentialKind::ApiKey,
+        AgentFormat::Json,
+        false,
+    ),
+    agent(
+        ".codeium/windsurf/mcp_config.json",
+        "Windsurf MCP config",
+        "MCP servers",
+        CredentialKind::ApiKey,
+        AgentFormat::Json,
+        false,
+    ),
+    agent(
+        ".config/devin/mcp_config.json",
+        "Devin MCP config",
+        "MCP servers",
+        CredentialKind::ApiKey,
+        AgentFormat::Json,
+        false,
+    ),
+    // Windows keeps these under %APPDATA% (AppData/Roaming) and
+    // %LOCALAPPDATA% (AppData/Local) inside the home folder.
+    agent(
+        "AppData/Roaming/Claude/claude_desktop_config.json",
+        "Claude Desktop MCP config",
+        "MCP servers",
+        CredentialKind::ApiKey,
+        AgentFormat::Json,
+        false,
+    ),
+    agent(
+        "AppData/Roaming/Code/User/mcp.json",
+        "VS Code MCP config",
+        "MCP servers",
+        CredentialKind::ApiKey,
+        AgentFormat::Json,
+        false,
+    ),
+    agent(
+        "AppData/Roaming/devin/mcp_config.json",
+        "Devin MCP config",
+        "MCP servers",
+        CredentialKind::ApiKey,
+        AgentFormat::Json,
+        false,
+    ),
+    agent(
+        "AppData/Local/github-copilot/hosts.json",
+        "GitHub Copilot sign-in",
+        "GitHub Copilot",
+        CredentialKind::OAuthSession,
+        AgentFormat::Json,
+        true,
+    ),
+    agent(
+        "AppData/Local/github-copilot/apps.json",
+        "GitHub Copilot sign-in",
+        "GitHub Copilot",
+        CredentialKind::OAuthSession,
+        AgentFormat::Json,
+        true,
+    ),
+    agent(
+        ".continue/config.yaml",
+        "Continue config",
+        "AI model providers",
+        CredentialKind::ApiKey,
+        AgentFormat::Lines,
+        false,
+    ),
+    agent(
+        ".aider.conf.yml",
+        "Aider config",
+        "AI model providers",
+        CredentialKind::ApiKey,
+        AgentFormat::Lines,
+        false,
+    ),
+    agent(
+        ".cache/huggingface/token",
+        "Hugging Face token",
+        "Hugging Face",
+        CredentialKind::ApiKey,
+        AgentFormat::Raw,
+        true,
+    ),
+    agent(
+        ".huggingface/token",
+        "Hugging Face token",
+        "Hugging Face",
+        CredentialKind::ApiKey,
+        AgentFormat::Raw,
+        true,
+    ),
 ];
 
 /// Whether a config key names secret material: `accessToken`,
@@ -1813,6 +2197,29 @@ fn agent_json_secrets<'v>(v: &'v serde_json::Value, out: &mut Vec<(String, &'v s
 }
 
 /// Secret-keyed literal values on `key: value` / `key = value` lines.
+/// A config value without its quotes, a trailing `# comment`, a trailing
+/// comma, or an `Authorization` scheme word (`Bearer …`, `Basic …`).
+fn agent_clean_value(raw: &str) -> &str {
+    let raw = raw.trim();
+    let value = match raw.chars().next() {
+        Some(q @ ('"' | '\'')) => raw[1..].split(q).next().unwrap_or(""),
+        _ => raw
+            .split(" #")
+            .next()
+            .unwrap_or("")
+            .trim()
+            .trim_end_matches(',')
+            .trim(),
+    };
+    let value = value.trim();
+    for scheme in ["Bearer ", "bearer ", "Basic ", "Token ", "token "] {
+        if let Some(rest) = value.strip_prefix(scheme) {
+            return rest.trim();
+        }
+    }
+    value
+}
+
 fn agent_line_secrets(text: &str) -> Vec<(String, &str)> {
     let unquote = |s: &str| {
         s.trim()
@@ -1822,20 +2229,71 @@ fn agent_line_secrets(text: &str) -> Vec<(String, &str)> {
             .to_string()
     };
     let mut out = Vec::new();
+    // Aider's `api-key:` takes a list of `provider=key` items.
+    let mut in_key_list: Option<String> = None;
     for line in text.lines() {
-        let l = line.trim().trim_start_matches("- ");
+        let trimmed = line.trim();
+        let listed = trimmed.starts_with("- ");
+        let l = trimmed.trim_start_matches("- ");
         if l.starts_with('#') || l.starts_with("//") {
             continue;
+        }
+        if let (true, Some(key)) = (listed, in_key_list.as_ref()) {
+            if let Some((_, v)) = l.split_once('=') {
+                let v = v.trim().trim_matches(|c| c == '"' || c == '\'');
+                if agent_literal_value(v) && !v.contains(char::is_whitespace) {
+                    out.push((key.clone(), v));
+                }
+            }
+            continue;
+        }
+        if !listed {
+            in_key_list = None;
         }
         let Some(i) = l.find([':', '=']) else {
             continue;
         };
         let key = unquote(&l[..i]);
         let raw = l[i + 1..].trim();
-        let value = raw
+        if raw.is_empty() && agent_secret_key(&key) {
+            in_key_list = Some(key);
+            continue;
+        }
+        // TOML inline table: `env = { OPENAI_API_KEY = "…", OTHER = "…" }`.
+        if let Some(inner) = raw
             .trim_end_matches(',')
-            .trim()
-            .trim_matches(|c| c == '"' || c == '\'');
+            .trim_end()
+            .strip_prefix('{')
+            .and_then(|r| r.strip_suffix('}'))
+        {
+            for part in inner.split(',') {
+                if let Some((k, v)) = part.split_once(['=', ':']) {
+                    let k = unquote(k);
+                    let v = agent_clean_value(v);
+                    if agent_secret_key(&k)
+                        && agent_literal_value(v)
+                        && !v.contains(char::is_whitespace)
+                    {
+                        out.push((k, v));
+                    }
+                }
+            }
+            continue;
+        }
+        let value = agent_clean_value(raw);
+        // `api-key: anthropic=sk-…` (Aider): the key follows a lowercase
+        // provider name. Base64 padding (`…Ng==`) is not a provider split.
+        let value = match value.split_once('=') {
+            Some((provider, rest))
+                if !provider.is_empty()
+                    && provider.len() <= 24
+                    && provider.chars().all(|c| c.is_ascii_lowercase() || c == '-')
+                    && rest.len() >= 8 =>
+            {
+                rest
+            }
+            _ => value,
+        };
         if agent_secret_key(&key)
             && agent_literal_value(value)
             && !value.contains(char::is_whitespace)
@@ -1942,16 +2400,26 @@ fn ai_agents(ctx: &mut Context) -> Vec<Discovered> {
             let mut keys: Vec<&str> = secrets.iter().map(|(k, _)| k.as_str()).collect();
             keys.sort_unstable();
             keys.dedup();
-            let shown: Vec<&str> = keys.iter().take(5).copied().collect();
-            let more = if keys.len() > shown.len() {
-                format!(" and {} more", keys.len() - shown.len())
-            } else {
-                String::new()
+            // A name is shown only when it is made of known words; a file can
+            // use the secret itself as a property name.
+            let nameable: Vec<&str> = keys.iter().copied().filter(|k| plain_key_name(k)).collect();
+            let shown: Vec<&str> = nameable.iter().take(5).copied().collect();
+            let hidden = keys.len() - shown.len();
+            let text = match (shown.is_empty(), hidden) {
+                (true, n) => format!(
+                    "{n} secret{} written literally in the config",
+                    if n == 1 { "" } else { "s" }
+                ),
+                (false, 0) => format!(
+                    "secrets written literally in the config ({})",
+                    shown.join(", ")
+                ),
+                (false, n) => format!(
+                    "secrets written literally in the config ({} and {n} more)",
+                    shown.join(", ")
+                ),
             };
-            c.evidence.push(redact_text(&format!(
-                "secrets written literally in the config ({}{more})",
-                shown.join(", ")
-            )));
+            c.evidence.push(redact_text(&text));
         }
         c.permissions.lifetime = if refresh {
             c.evidence
@@ -2154,7 +2622,7 @@ fn kubernetes(ctx: &mut Context) -> Vec<Discovered> {
                 &ctx.display(&file),
                 &format!("cluster {cluster}"),
             );
-            c.permissions.identity = Some(user.clone());
+            c.permissions.identity = Some(safe_identity(&user));
             c.permissions.organization = Some(server.clone());
             c.permissions.assurance = Assurance::Inferred;
             let production = ctx.is_production(name)
@@ -5450,5 +5918,92 @@ mod tests {
             "{reasons:?}"
         );
         std::fs::remove_dir_all(&home).ok();
+    }
+}
+
+#[cfg(test)]
+mod aider_format_tests {
+    use super::agent_line_secrets;
+
+    #[test]
+    fn aider_api_key_list_and_inline_provider_forms_are_read() {
+        // Synthetic values.
+        let list = "model: sonnet\napi-key:\n  - anthropic=sk-ant-api03-Zq3Xr7Lm2Np8Vt4Wy6Bc1\n  - openai=sk-proj-Q7xR2mK9pL4vN8cT3wZ6\nauto-commits: false\n";
+        let found = agent_line_secrets(list);
+        assert_eq!(
+            found.len(),
+            2,
+            "{:?}",
+            found.iter().map(|(k, _)| k).collect::<Vec<_>>()
+        );
+        assert!(found
+            .iter()
+            .all(|(k, v)| k == "api-key" && v.starts_with("sk-")));
+        let inline = "api-key: anthropic=sk-ant-api03-Zq3Xr7Lm2Np8Vt4Wy6Bc1\n";
+        let found = agent_line_secrets(inline);
+        assert_eq!(found.len(), 1);
+        assert!(found[0].1.starts_with("sk-ant-"), "provider name stripped");
+    }
+}
+
+#[cfg(test)]
+mod leak_guard_tests {
+    use super::{plain_key_name, safe_identity};
+
+    #[test]
+    fn token_shaped_identities_are_cut_to_four_characters() {
+        // Synthetic tokens.
+        assert_eq!(
+            safe_identity("ghp_Q7xR2mK9pL4vN8cT3wZ6yB1hD5fJ0gS2uE7a"),
+            "ghp_****"
+        );
+        assert_eq!(safe_identity("glpatQ7xR2mK9pL4vN8cT3wZ6"), "glpa****");
+        assert_eq!(safe_identity("james"), "james");
+        assert_eq!(safe_identity("ops@acme.dev"), "ops@acme.dev");
+    }
+
+    #[test]
+    fn only_word_built_key_names_are_shown() {
+        for ok in [
+            "OPENAI_API_KEY",
+            "accessToken",
+            "client_secret",
+            "apiKey",
+            "Authorization",
+            "GITHUB_PERSONAL_ACCESS_TOKEN",
+        ] {
+            assert!(plain_key_name(ok), "{ok}");
+        }
+        for hidden in [
+            "CedarFox42_token",
+            "N7vQ9mK2pL4xR8wT1zToken",
+            "q7xr2mk9pl4vn8ct_secret",
+        ] {
+            assert!(!plain_key_name(hidden), "{hidden}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod agent_syntax_tests {
+    use super::agent_line_secrets;
+
+    #[test]
+    fn comments_bearer_headers_inline_tables_and_base64_padding() {
+        // Synthetic values.
+        let f = agent_line_secrets("apiKey: Q7xR2mK9pL4vN8cT3wZ6 # production\n");
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].1, "Q7xR2mK9pL4vN8cT3wZ6");
+        let f = agent_line_secrets("Authorization = \"Bearer Q7xR2mK9pL4vN8cT3wZ6\"\n");
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].1, "Q7xR2mK9pL4vN8cT3wZ6");
+        let f = agent_line_secrets(
+            "env = { OPENAI_API_KEY = \"sk-proj-Q7xR2mK9pL4vN8cT3wZ6\", MODE = \"fast\" }\n",
+        );
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].0, "OPENAI_API_KEY");
+        let f = agent_line_secrets("apiKey: \"Q2VkYXJGb3g0Mk5lY3Rhcg==\"\n");
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].1, "Q2VkYXJGb3g0Mk5lY3Rhcg==");
     }
 }

@@ -72,15 +72,9 @@ and the report connects the dots between them.
 `gorse scan --deep` reads the files in Desktop, Documents, Downloads and
 Pictures for API keys, passwords, private keys, seed phrases and sensitivity
 labels, including the text inside screenshots. Add `--all-dirs` for the whole
-home folder (Pro). Add the open-source TruffleHog scanner as a second engine
-with one click in the app, or `gorse engines install trufflehog`: one
-75 MB download (about 175 MB on disk) from Truffle Security's GitHub release, checked against a
-checksum built into Gorse and kept in Gorse's own folder. It runs with
-verification switched off so no secret is sent anywhere; `--no-trufflehog`
-skips it and `gorse engines remove trufflehog` deletes it. Once it is
-installed the Fast Scan uses it too, over the known credential locations
-only: a token it recognises that Gorse has no adapter for is listed with
-its reach marked "not assessed" rather than left out.
+home folder (Pro). Detection runs inside Gorse: its own rules plus a
+converted copy of the open-source Gitleaks rule set (MIT licence, credited in
+LICENSE-THIRD-PARTY) run in one pass, and nothing is downloaded.
 
 ## What the check sees, and what it does not
 

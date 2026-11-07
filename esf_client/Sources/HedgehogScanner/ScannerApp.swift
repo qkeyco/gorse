@@ -21,7 +21,6 @@ struct HedgehogDesktopApp: App {
     @StateObject private var scanner = ScannerModel()
     @StateObject private var license = LicenseModel()
     @StateObject private var update = UpdateModel()
-    @StateObject private var engines = EngineModel()
     @StateObject private var schedule = ScheduleModel()
     @State private var tab: DesktopTab = .exposure
 
@@ -44,7 +43,6 @@ struct HedgehogDesktopApp: App {
             }
             .frame(minWidth: 820, minHeight: 620)
             .environmentObject(license)
-            .environmentObject(engines)
             .environmentObject(schedule)
             .toolbar {
                 ToolbarItem(placement: .primaryAction) { LicenseBadge(model: license) }
@@ -68,7 +66,6 @@ struct HedgehogDesktopApp: App {
                 MoveToApplications.offerIfNeeded()
                 await license.refresh()
                 await update.check()
-                await engines.refresh()
                 await schedule.refresh()
                 // The question the app exists to answer; ask it as soon as the
                 // window is up rather than waiting for a click.

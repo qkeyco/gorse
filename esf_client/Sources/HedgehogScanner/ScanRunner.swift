@@ -22,21 +22,12 @@ enum ScanError: LocalizedError {
     }
 }
 
-struct ScanEngine: Codable, Hashable {
-    let name: String
-    let version: String?
-    let findings: Int?
-    let error: String?
-}
-
 struct ScanReport: Codable {
     let findings: [ScanFinding]
     let total: Int
     let files_scanned: Int
     let elapsed_secs: Int
     let interrupted: Bool
-    /// Extra engines that ran (TruffleHog, when installed). Absent in older reports.
-    let engines: [ScanEngine]?
     /// What the scan did not look at. Optional so a report from an older
     /// helper (which never sent it) still decodes; it is then treated as
     /// unconfirmed, never as complete.
@@ -85,6 +76,8 @@ struct ScanCoverage: Codable, Hashable {
     let notes_unreadable: Bool?
     /// How many Apple Notes were read, when the scan read them this run.
     var notes_read: Int? = nil
+    /// Pattern matches in test and example files left out as test data.
+    var test_data_left_out: Int? = nil
 }
 
 extension ScanCoverage {
@@ -118,7 +111,8 @@ extension ScanCoverage {
             images_content_not_checked: images_content_not_checked + o.images_content_not_checked,
             image_ocr_cap_reached: image_ocr_cap_reached || o.image_ocr_cap_reached,
             notes_unreadable: notes_unreadable == true || o.notes_unreadable == true ? true : (notes_unreadable ?? o.notes_unreadable),
-            notes_read: notes_read == nil && o.notes_read == nil ? nil : (notes_read ?? 0) + (o.notes_read ?? 0)
+            notes_read: notes_read == nil && o.notes_read == nil ? nil : (notes_read ?? 0) + (o.notes_read ?? 0),
+            test_data_left_out: test_data_left_out == nil && o.test_data_left_out == nil ? nil : (test_data_left_out ?? 0) + (o.test_data_left_out ?? 0)
         )
     }
 }
@@ -156,6 +150,9 @@ extension ScanReport {
         var notes: [String] = []
         if c.files_skipped_by_type > 0 {
             notes.append("\(Self.items(c.files_skipped_by_type, "file", "files")) of a type this scanner cannot read, such as PDFs or archives, \(c.files_skipped_by_type == 1 ? "was" : "were") checked by name only.")
+        }
+        if let n = c.test_data_left_out, n > 0 {
+            notes.append("\(Self.items(n, "match", "matches")) in test and example files (made-up keys that test suites use) \(n == 1 ? "was" : "were") left out.")
         }
         if c.notes_read == 0 {
             notes.append("No Apple Notes were found to read.")

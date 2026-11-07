@@ -16,8 +16,8 @@ use crate::text::{
     relative_time, thousands,
 };
 use crate::{
-    app_dir, badge, cli_path, open_url, placeholder, reveal_path, safe_url, severity_color,
-    severity_rank, App, AMBER, PRICING_URL,
+    app_dir, badge, cli_path, open_url, placeholder, reveal_path, safe_url, severity_rank, App,
+    AMBER, PRICING_URL,
 };
 use eframe::egui::{self, Color32, RichText};
 use serde::Deserialize;
@@ -34,8 +34,6 @@ use std::time::{Duration, Instant};
 #[derive(Deserialize, Clone, Default, Debug)]
 pub struct ScanReport {
     #[serde(default)]
-    pub engines: Vec<ScanEngine>,
-    #[serde(default)]
     pub findings: Vec<ScanFinding>,
     #[serde(default)]
     pub total: u64,
@@ -48,15 +46,6 @@ pub struct ScanReport {
     /// What the scan did not look at. Absent from an older CLI's report,
     /// which is then treated as unconfirmed, never as complete.
     pub coverage: Option<ScanCoverage>,
-}
-
-#[derive(Deserialize, Clone, Default, Debug, PartialEq)]
-pub struct ScanEngine {
-    #[serde(default)]
-    pub name: String,
-    pub version: Option<String>,
-    pub findings: Option<u64>,
-    pub error: Option<String>,
 }
 
 #[derive(Deserialize, Clone, Default, Debug, PartialEq)]
@@ -189,8 +178,6 @@ pub struct ScanFinding {
     pub group: Option<String>,
     #[serde(default)]
     pub rotation_guide: Option<String>,
-    #[serde(default)]
-    pub engine: Option<String>,
 }
 
 fn lenient_percent<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<u8>, D::Error> {
@@ -249,11 +236,6 @@ pub fn merge_reports<'a>(parts: impl IntoIterator<Item = &'a ScanReport>) -> Opt
         m.files_scanned += r.files_scanned;
         m.elapsed_secs += r.elapsed_secs;
         m.interrupted |= r.interrupted;
-        for e in &r.engines {
-            if !m.engines.contains(e) {
-                m.engines.push(e.clone());
-            }
-        }
         if let Some(c) = &r.coverage {
             m.coverage = Some(match &m.coverage {
                 Some(prev) => prev.merging(c),
@@ -782,7 +764,6 @@ impl LiveScan {
         Some(match self.phase.as_deref()? {
             "images" => "Reading the text inside pictures…",
             "notes" => "Reading notes…",
-            "trufflehog" => "Running TruffleHog's detectors…",
             _ => "Finishing…",
         })
     }
@@ -1505,16 +1486,6 @@ impl DeepState {
         if r.interrupted {
             text.push_str(" (stopped early)");
         }
-        if let Some(th) = r.engines.iter().find(|e| e.name == "trufflehog") {
-            if th.error.is_none() {
-                text.push_str(&format!(
-                    " · with TruffleHog {}",
-                    th.version.clone().unwrap_or_default()
-                ));
-            } else {
-                text.push_str(" · TruffleHog failed");
-            }
-        }
         if matches!(coverage_state(r), CoverageState::Gaps { .. }) {
             text.push_str(" · some files not checked");
         }
@@ -1562,8 +1533,6 @@ impl App {
             .show(ui, |ui| {
                 self.places_list(ui);
                 self.folder_list(ui);
-                ui.add_space(8.0);
-                self.engine_card(ui);
             });
     }
 
@@ -1767,66 +1736,6 @@ impl App {
         if let Some(f) = remove {
             self.deep.remove_folder(&f);
         }
-    }
-
-    fn engine_card(&mut self, ui: &mut egui::Ui) {
-        egui::Frame::group(ui.style()).show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            if self.engine.installed {
-                ui.add(
-                    egui::Label::new(
-                        RichText::new(if self.engine.managed {
-                            format!("✔ TruffleHog {} is installed. Its ≈800 detectors run with every Deep Scan, verification off.", self.engine.version.clone().unwrap_or_default())
-                        } else {
-                            "✔ TruffleHog found on this computer. Its detectors run with every Deep Scan, verification off.".to_string()
-                        })
-                        .small()
-                        .weak(),
-                    )
-                    .wrap(),
-                );
-                if self.engine.managed
-                    && ui.link(RichText::new("Remove").small()).clicked()
-                {
-                    self.remove_trufflehog();
-                }
-            } else if self.install_rx.is_some() {
-                let p = self.install_progress.lock().unwrap().clone();
-                let mb = p.received as f64 / 1_048_576.0;
-                match p.total {
-                    Some(t) if t > 0 => {
-                        ui.label(RichText::new(format!("Downloading TruffleHog… {:.0} of {:.0} MB", mb, t as f64 / 1_048_576.0)).small());
-                        ui.add(egui::ProgressBar::new((p.received as f64 / t as f64).min(1.0) as f32));
-                    }
-                    _ => {
-                        ui.horizontal(|ui| {
-                            ui.spinner();
-                            ui.label(RichText::new(format!("Downloading TruffleHog… {mb:.0} MB")).small());
-                        });
-                    }
-                }
-                ui.ctx().request_repaint_after(Duration::from_millis(250));
-            } else {
-                ui.label(RichText::new("Add TruffleHog's ≈800 detectors").small().strong());
-                ui.add(
-                    egui::Label::new(
-                        RichText::new(format!("Open source, by Truffle Security. A {} MB download from GitHub (about 175 MB on disk), checked against a known checksum and kept in Gorse's own folder. Runs with verification off, so nothing leaves this computer.", self.engine.download_mb))
-                            .small()
-                            .weak(),
-                    )
-                    .wrap(),
-                );
-                if ui.small_button("Add TruffleHog").clicked() {
-                    self.start_trufflehog_install();
-                }
-                if let Some(e) = &self.install_error {
-                    ui.add(
-                        egui::Label::new(RichText::new(e).small().color(severity_color("critical")))
-                            .wrap(),
-                    );
-                }
-            }
-        });
     }
 
     fn results_pane(&mut self, ui: &mut egui::Ui) {
@@ -2365,8 +2274,6 @@ mod tests {
             23.0,
         );
         assert_eq!(live.fraction(), Some(0.99), "never 100% before the end");
-        live.apply(ScanEvent::Phase("trufflehog".into()), 24.0);
-        assert_eq!(live.phase_text(), Some("Running TruffleHog's detectors…"));
         live.apply(ScanEvent::Phase("done".into()), 25.0);
         assert_eq!(live.phase_text(), Some("Finishing…"));
 

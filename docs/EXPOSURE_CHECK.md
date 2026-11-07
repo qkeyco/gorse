@@ -19,31 +19,22 @@ hedgehog exposure --init          # write ~/.hedgehog/authority.toml to describe
 hedgehog exposure --mark-production NAME   # record a host or system as production in the map (the apps' "Mark as production" button)
 ```
 
-The deep scan (`hedgehog scan --deep`) runs TruffleHog as a second engine
-when it is installed (`hedgehog engines install trufflehog` downloads the
-pinned release, verifies it against a checksum in `hedgehog-cli/src/engines.rs`,
-and keeps it under `~/.hedgehog/engines`; the apps offer this as one click), always with `--no-verification`, so the promise that
-the scan sends nothing anywhere holds; its findings carry the detector name
-as the category and never the raw secret. `--no-trufflehog` or
-`HEDGEHOG_NO_TRUFFLEHOG=1` turns it off.
+The deep scan (`hedgehog scan --deep`) does all of its detection itself:
+Gorse's own rules and a converted copy of the open-source Gitleaks rule set
+(MIT licence, credited in LICENSE-THIRD-PARTY) run in one pass on Gorse's own
+matcher. Nothing is downloaded and no other program runs, so the promise that
+the scan sends nothing anywhere holds; a finding carries the rule's category
+and never the raw secret.
 
-The Fast Scan (`hedgehog exposure`) uses the same engine when it is
-installed: one run, verification off, over the known credential locations
-that exist on the machine (encrypted stores such as the macOS keychains,
-GnuPG keyrings, the Windows Credential Manager blobs, Bitwarden data and
-Chrome's Login Data are left out, since pattern detectors over ciphertext
-report junk, and so are the large browser-profile and wallet trees, which
-are watched for presence only). The list of locations and the published
-source for each one is `hedgehog-cli/data/credential-locations.toml`; see
-`docs/CREDENTIAL_LOCATIONS.md` for how it is kept current. A detection in a file
-Hedgehog already read and assessed is dropped: Hedgehog's own finding
-carries the reach. Anything else becomes a Low finding with confidence
-"unknown" whose evidence says the vendor is recognised and the reach has not
-been assessed, which the report says is not the same as safe. The JSON
-report lists the run under `engines` (locations handed over, detections,
-findings added, never a secret); `--no-trufflehog` skips it, and without the
-engine the notes say how to add it. The MCP `exposure_check` tool runs it
-too.
+The Fast Scan (`hedgehog exposure`) reads the known credential locations
+that exist on the machine through its own adapters. Encrypted stores such as
+the macOS keychains, GnuPG keyrings, the Windows Credential Manager blobs,
+Bitwarden data and Chrome's Login Data are watched for presence only and
+never opened, and so are the large browser-profile and wallet trees. The list
+of locations and the published source for each one is
+`hedgehog-cli/data/credential-locations.toml`; see
+`docs/CREDENTIAL_LOCATIONS.md` for how it is kept current. The MCP
+`exposure_check` tool runs the same check.
 
 An SSH key is scored as a shell on the hosts that accept it, not as mere
 reachability: Medium for a host nobody has identified (Low when the key has a
@@ -327,7 +318,7 @@ the Mac App Store Scanner does not have it yet.
   counts only: no names, locations or fingerprints.
 - **History.** What changed and when lives in `~/.hedgehog/exposure/history`.
 - **Nothing leaves the computer.** Scheduled runs send nothing to Gorse and
-  never download anything; TruffleHog is used only if already installed.
+  never download anything.
 
 ## Known limitations
 

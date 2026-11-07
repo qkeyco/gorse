@@ -550,15 +550,6 @@ fn render_json_body(r: &ExposureReport) -> serde_json::Value {
             "source": source,
             "reason": reason,
         })).collect::<Vec<_>>(),
-        "engines": r.engines.iter().map(|e| serde_json::json!({
-            "name": e.name,
-            "version": e.version,
-            "locations": e.locations,
-            "detections": e.detections,
-            "added": e.added,
-            "verification": "off",
-            "error": e.error,
-        })).collect::<Vec<_>>(),
         "attestation": r.attestation.as_ref().map(|a| serde_json::json!({
             "holder": a.holder,
             "machine": a.machine,
@@ -959,7 +950,6 @@ mod tests {
             declarations_path: PathBuf::from("authority.toml"),
             declarations_loaded: false,
             attestation: None,
-            engines: vec![],
             coverage_failures: vec![],
             incomplete: false,
             finding_meta: vec![FindingMeta {

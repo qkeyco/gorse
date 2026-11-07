@@ -483,7 +483,6 @@ fn tool_exposure_check(
         verify,
         declarations: map,
         max_hops,
-        trufflehog: true,
     }) {
         Ok(mut report) => {
             // Stamped last, over the document exactly as returned.

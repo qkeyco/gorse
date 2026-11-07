@@ -32,9 +32,8 @@ Third-party components keep their own licences, listed in
 [LICENSE-THIRD-PARTY](LICENSE-THIRD-PARTY). These include:
 
 - the Destructive Command Guard rule set, under the MIT licence;
-- TruffleHog, an optional scanning engine that Gorse can download and run. It
-  is a separate program under the GNU Affero General Public License and is not
-  part of this repository.
+- the Gitleaks secret-detection rule set, under the MIT licence, converted to
+  run on Gorse's own matcher (the Gitleaks program itself is not included).
 
 ## Patents
 

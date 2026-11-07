@@ -399,184 +399,7 @@ const API_KEY_PREFIXES: &[(&str, usize, &str)] = &[
 // This catches seed phrases without embedding the full wordlist.
 // A word matches if its first 4 chars are in this list.
 
-const BIP39_PREFIXES: &[&str] = &[
-    "aban", "abil", "able", "abou", "abov", "abse", "abso", "abst", "absu", "abus", "acce", "acci",
-    "acco", "accu", "ache", "acid", "acou", "acqu", "acre", "acro", "act", "acti", "acto", "actu",
-    "adap", "add", "addi", "addr", "adju", "admi", "adop", "adul", "adva", "advi", "aero", "affa",
-    "affo", "afra", "agai", "age", "agen", "agre", "ahea", "aim", "air", "airp", "aisl", "alar",
-    "albu", "alco", "aler", "alie", "all", "alle", "allo", "almo", "alph", "alre", "also", "alte",
-    "alum", "alwa", "amat", "amaz", "amon", "amou", "amus", "anal", "anch", "anci", "ange", "angr",
-    "anim", "ankl", "anno", "annu", "anot", "answ", "ante", "anti", "anxi", "any", "apar", "apol",
-    "appa", "appl", "appr", "aqua", "arch", "arct", "area", "aren", "argu", "aria", "arm", "arme",
-    "armo", "army", "arra", "arre", "arri", "arro", "art", "arte", "arti", "artw", "ask", "aspe",
-    "assa", "asse", "assi", "assu", "asth", "atom", "atta", "atte", "attr", "auct", "audi", "augu",
-    "aunt", "auto", "autu", "aver", "avoc", "avoi", "awak", "awar", "awes", "awfu", "awkw", "axis",
-    "baby", "bach", "back", "badg", "bag", "bala", "balc", "ball", "bamb", "bana", "band", "bank",
-    "bar", "bare", "barg", "barn", "barr", "base", "basi", "bask", "batc", "bath", "batt", "be",
-    "beac", "bean", "bear", "beat", "beau", "beca", "beco", "beef", "befo", "begi", "beha", "behi",
-    "beli", "bell", "belo", "belt", "benc", "bene", "best", "betr", "bett", "betw", "beyo", "bicy",
-    "bid", "bike", "bill", "bird", "birt", "bitt", "blac", "blad", "blam", "blan", "blas", "blea",
-    "bles", "blin", "bloo", "blos", "blow", "blue", "blur", "blus", "boar", "boat", "body", "boil",
-    "bomb", "bond", "bone", "bonu", "book", "boos", "boot", "bord", "bore", "borr", "boss", "bott",
-    "boun", "bowl", "box", "boy", "brac", "brai", "bran", "bras", "brav", "brea", "bree", "bric",
-    "brid", "brie", "brig", "brin", "bris", "broa", "broc", "brok", "bron", "broo", "brot", "brow",
-    "brus", "bubb", "budd", "budg", "buff", "buil", "bulb", "bulk", "bull", "bund", "bunk", "burd",
-    "burg", "burn", "bus", "busi", "busy", "butt", "buye", "buzz", "cabb", "cabi", "cabl", "cact",
-    "cage", "cake", "call", "calm", "came", "camp", "can", "cana", "canc", "cand", "cann", "cano",
-    "canv", "cany", "capa", "capi", "capt", "car", "carb", "card", "carg", "carp", "carr", "cart",
-    "case", "cash", "casi", "cast", "casu", "cat", "cata", "catc", "cate", "catt", "caug", "caus",
-    "caut", "cave", "ceil", "cele", "ceme", "cens", "cent", "cere", "cert", "chai", "cham", "chan",
-    "chao", "chap", "char", "chas", "chea", "chec", "chee", "cher", "ches", "chic", "chie", "chil",
-    "chim", "choi", "choo", "chro", "chuc", "chun", "chur", "ciga", "cinn", "circ", "citi", "city",
-    "civi", "clai", "clam", "clap", "clar", "clas", "claw", "clay", "clea", "cler", "clev", "clif",
-    "clim", "clin", "clip", "cloa", "cloc", "clog", "clos", "clot", "clou", "clow", "club", "clum",
-    "clus", "clut", "coac", "coas", "coco", "code", "coff", "coil", "coin", "coll", "colo", "colu",
-    "comb", "come", "comf", "comi", "comm", "comp", "conc", "cond", "conf", "cong", "conn", "cons",
-    "cont", "conv", "cook", "cool", "copp", "copy", "cora", "core", "corn", "corr", "cost", "cott",
-    "couc", "coun", "coup", "cour", "cous", "cove", "coyó", "crab", "crac", "crad", "craf", "cram",
-    "cran", "cras", "crat", "craw", "craz", "crea", "cred", "crew", "cric", "crim", "cris", "crit",
-    "crop", "cros", "crow", "cruc", "crue", "crui", "crum", "crun", "crus", "cry", "crys", "cube",
-    "cult", "cup", "cupb", "curi", "curr", "curt", "curv", "cush", "cust", "cute", "cycl", "dad",
-    "dail", "dama", "damp", "danc", "dang", "dare", "dark", "dash", "daug", "dawn", "day", "dead",
-    "deal", "dear", "deba", "debr", "deca", "dece", "deci", "decl", "deco", "decr", "deer", "defe",
-    "defi", "defy", "degr", "dela", "deli", "dema", "demo", "deni", "dent", "deny", "depa", "depe",
-    "depl", "depo", "dept", "depu", "deri", "desc", "dese", "desi", "desk", "desp", "dest", "deta",
-    "dete", "deve", "devi", "devo", "diag", "dial", "diam", "diar", "dice", "dies", "diet", "diff",
-    "digi", "dign", "dile", "dilu", "dime", "dini", "dinn", "dino", "dire", "dirt", "disa", "disc",
-    "dise", "dish", "dism", "diso", "disp", "dist", "ditc", "dive", "divo", "dizz", "doct", "docu",
-    "dog", "doll", "dolp", "doma", "dona", "donk", "dono", "door", "dose", "doub", "dove", "draf",
-    "drag", "dram", "dras", "draw", "drea", "dres", "drif", "dril", "drin", "drip", "driv", "drop",
-    "drum", "dry", "duck", "dumb", "dune", "duri", "dust", "duty", "dwar", "dyna", "eage", "earl",
-    "earn", "eart", "easi", "east", "easy", "echo", "ecol", "econ", "edge", "edit", "educ", "effo",
-    "egg", "eigh", "eith", "elbo", "elde", "elec", "eleg", "elem", "elep", "elev", "elit", "else",
-    "emba", "embr", "emer", "emis", "emot", "empl", "empo", "empt", "enab", "enac", "enem", "ener",
-    "enfo", "enga", "engi", "enha", "enjo", "enli", "enou", "enri", "enro", "ensu", "ente", "enti",
-    "entr", "enve", "epis", "equa", "equi", "era", "eros", "erro", "erup", "esca", "essa", "esta",
-    "etat", "eter", "ethi", "evid", "evil", "evok", "evol", "exac", "exam", "exce", "exch", "exci",
-    "excl", "excu", "exec", "exer", "exha", "exhi", "exil", "exit", "exot", "expa", "expe", "expi",
-    "expo", "expr", "exte", "extr", "eye", "eyeb", "fabr", "face", "facu", "fade", "fain", "fait",
-    "fall", "fals", "fame", "fami", "famo", "fan", "fanc", "fant", "farm", "fasc", "fash", "fat",
-    "fata", "fath", "fati", "faul", "favo", "fawn", "fear", "feat", "febr", "fede", "fee", "feed",
-    "feel", "fema", "fenc", "fest", "fetc", "feve", "few", "fibe", "fict", "fiel", "figu", "file",
-    "film", "filt", "fina", "find", "fine", "fing", "fini", "fire", "firm", "firs", "fisc", "fish",
-    "fit", "fitn", "fix", "flag", "flam", "flas", "flat", "flav", "flee", "flig", "flip", "floa",
-    "floc", "floo", "flow", "flui", "flus", "fly", "foam", "focu", "fog", "foil", "fold", "foll",
-    "food", "foot", "forc", "fore", "forg", "form", "fort", "foss", "fost", "foun", "fox", "frag",
-    "fram", "freq", "fres", "frie", "frin", "frog", "fron", "fros", "frow", "froz", "frui", "fuel",
-    "fun", "funn", "furn", "fury", "futu", "gadg", "gain", "gala", "gall", "game", "gap", "gara",
-    "garb", "gard", "garl", "garm", "gas", "gasp", "gate", "gath", "gaug", "gaze", "gene", "geni",
-    "genr", "gent", "genu", "gest", "ghos", "gian", "gift", "gigg", "ging", "gira", "girl", "give",
-    "glad", "glan", "glar", "glas", "glea", "glob", "gloo", "glov", "glow", "glue", "goat", "godd",
-    "gold", "good", "goos", "gori", "gosp", "goss", "gove", "gown", "grab", "grac", "grad", "grai",
-    "gran", "grap", "gras", "grat", "grav", "gray", "grea", "gree", "grid", "grie", "grin", "grip",
-    "groc", "grou", "grow", "grue", "grun", "guar", "gues", "guid", "guil", "guit", "gun", "gym",
-    "habi", "hair", "half", "hamm", "hams", "hand", "happ", "harb", "hard", "hars", "harv", "hast",
-    "hat", "have", "hawk", "haza", "head", "heal", "hear", "heav", "hedg", "heig", "hell", "help",
-    "hen", "hero", "hid", "high", "hill", "hint", "hip", "hire", "hist", "hobb", "hock", "hold",
-    "hole", "holi", "holl", "home", "hone", "hood", "hope", "horn", "horr", "hors", "hosp", "host",
-    "hot", "hote", "hour", "hove", "hub", "huge", "huma", "humb", "humo", "hund", "hung", "hunt",
-    "hurd", "hurr", "hurt", "husb", "hybr", "ice", "icon", "idea", "iden", "igno", "ill", "ille",
-    "illn", "imag", "imit", "imme", "immu", "impa", "impo", "impr", "impu", "inab", "inch", "incl",
-    "incr", "inde", "indi", "indo", "indu", "infa", "infl", "info", "inhe", "init", "inje", "inma",
-    "inne", "inno", "inpu", "inqu", "insa", "inse", "insi", "insp", "inst", "insu", "inta", "inte",
-    "into", "inva", "inve", "invi", "invo", "inwa", "iron", "isla", "isol", "issu", "item", "ivor",
-    "jack", "jagu", "jar", "jazz", "jeal", "jean", "jell", "jerk", "jet", "jewe", "job", "jock",
-    "join", "joke", "jour", "joy", "judg", "juic", "jump", "jung", "juni", "junk", "jury", "just",
-    "juven", "kang", "keen", "keep", "ketc", "key", "kick", "kid", "kidn", "kind", "king", "kiss",
-    "kit", "kitc", "kite", "kitt", "knee", "knif", "knoc", "know", "lab", "labe", "labo", "ladd",
-    "lady", "lake", "lamp", "lang", "lapt", "larg", "late", "lati", "laug", "lava", "law", "lawn",
-    "laws", "laye", "lazy", "lead", "leaf", "lean", "lear", "leas", "leat", "leav", "lect", "left",
-    "leg", "lega", "lege", "leis", "lemo", "lend", "leng", "lens", "leop", "less", "lett", "leve",
-    "liar", "libe", "libr", "lice", "life", "lift", "ligh", "like", "limb", "limi", "line", "link",
-    "lion", "liqu", "list", "lite", "litt", "live", "liza", "load", "loan", "lobs", "loca", "lock",
-    "logi", "lone", "long", "loop", "lott", "loud", "loun", "love", "loya", "luck", "lugg", "lumb",
-    "luna", "lunc", "lung", "luxu", "lyri", "mach", "mad", "magi", "magn", "maid", "mail", "main",
-    "majo", "make", "male", "mall", "mamm", "man", "mana", "mand", "mang", "mans", "manu", "mapl",
-    "marb", "marc", "marg", "mari", "mark", "marr", "mask", "mass", "mast", "matc", "mate", "math",
-    "matr", "matt", "maxi", "maze", "mead", "mean", "meas", "meat", "mech", "meda", "medi", "melo",
-    "melt", "memb", "memo", "ment", "menu", "merc", "merg", "meri", "merr", "mesh", "mess", "meta",
-    "meth", "midd", "midn", "milk", "mill", "mime", "mind", "mine", "mini", "mino", "minu", "mira",
-    "mirr", "mise", "miss", "mist", "mix", "mixe", "mixt", "mobi", "mode", "modi", "mom", "mome",
-    "mona", "monk", "mons", "mont", "mood", "moon", "mora", "more", "morn", "mosq", "moth", "moti",
-    "moto", "moun", "mous", "move", "movi", "much", "muff", "mule", "mult", "musc", "muse", "mush",
-    "musi", "must", "mutu", "myse", "myst", "myth", "naiv", "name", "napk", "narr", "nast", "nati",
-    "natu", "near", "neat", "nece", "neck", "nega", "negl", "neit", "neph", "nerv", "nest", "net",
-    "netw", "neut", "neve", "news", "next", "nice", "nigh", "nitr", "nobl", "nois", "nomi", "noon",
-    "norm", "nort", "nose", "nota", "note", "noth", "noti", "nove", "now", "nucl", "numb", "nurs",
-    "nut", "oak", "obey", "obje", "obli", "obsc", "obse", "obta", "obvi", "occu", "ocur", "ocea",
-    "octo", "odd", "off", "offe", "offi", "offs", "oliv", "olym", "omit", "once", "one", "onio",
-    "onli", "open", "oper", "opin", "oppo", "opti", "oral", "oran", "orbi", "orch", "orde", "ordi",
-    "orga", "orie", "orig", "orna", "orph", "ostr", "othe", "outd", "oute", "outp", "oval", "oven",
-    "over", "own", "owne", "oxyg", "oyst", "ozon", "pact", "padd", "page", "pair", "pala", "palm",
-    "pand", "pane", "pani", "pant", "pape", "para", "pare", "park", "parr", "part", "pass", "patc",
-    "path", "patr", "patt", "paus", "pave", "paym", "peac", "pean", "pear", "peas", "peda", "peel",
-    "peer", "pelt", "pen", "pena", "pend", "peng", "peop", "pepp", "perf", "perm", "pers", "pet",
-    "phon", "phot", "phra", "phys", "pian", "pick", "pict", "piec", "pig", "pige", "pill", "pilo",
-    "pink", "pion", "pipe", "pist", "pitc", "pizz", "plac", "plan", "plas", "plat", "play", "plea",
-    "pled", "pluc", "plug", "plun", "pock", "poem", "poet", "poin", "pola", "pole", "poli", "polo",
-    "pond", "pony", "pool", "popu", "porc", "port", "pose", "posi", "poss", "post", "pota", "pott",
-    "poul", "pour", "pove", "powe", "prac", "prai", "pray", "pred", "pref", "prep", "pres", "pret",
-    "prev", "pric", "prid", "prim", "prin", "prio", "pris", "priv", "priz", "prob", "proc", "prod",
-    "prof", "prog", "proj", "prom", "proo", "prop", "pros", "prot", "prou", "prov", "prox", "prud",
-    "publ", "pudl", "pull", "pulp", "puls", "pump", "punc", "pung", "pupi", "pupp", "purc", "puri",
-    "purp", "purs", "push", "put", "puzz", "pyra", "qual", "quan", "quar", "quer", "ques", "quic",
-    "quit", "quiz", "quot", "rabb", "racc", "race", "rack", "rada", "radi", "raft", "rage", "rail",
-    "rain", "rais", "rall", "ramp", "ranc", "rand", "rang", "rapi", "rare", "rate", "rath", "rave",
-    "razo", "read", "real", "reas", "rebe", "rebu", "reca", "rece", "reci", "reco", "recy", "redu",
-    "reef", "refe", "refl", "refo", "refu", "rega", "regi", "regr", "regu", "rein", "reje", "rela",
-    "rele", "reli", "relu", "rema", "reme", "remi", "remo", "rene", "rent", "reop", "repa", "repe",
-    "repl", "repo", "repr", "repu", "requ", "resc", "rese", "resi", "reso", "resp", "rest", "resu",
-    "reta", "reti", "retr", "retu", "reun", "reve", "revi", "revo", "rewa", "rhyt", "rib", "ribb",
-    "rice", "rich", "ride", "ridg", "rifl", "righ", "rigi", "ring", "riot", "ripp", "risk", "ritu",
-    "riva", "rive", "road", "roas", "robo", "robu", "rock", "rode", "role", "roll", "roma", "roof",
-    "rook", "room", "rose", "rota", "roug", "roun", "rout", "roya", "rubb", "rude", "rug", "rule",
-    "run", "runa", "rura", "rush", "rust", "ruth", "rye", "sadd", "safe", "sail", "sala", "salm",
-    "salo", "salt", "salu", "same", "samp", "sand", "sane", "sant", "sati", "satu", "sauc", "saus",
-    "sava", "save", "say", "scal", "scan", "scar", "scat", "scen", "sche", "scho", "scie", "scis",
-    "scoo", "scor", "scou", "scra", "scre", "scri", "sea", "sear", "seas", "seat", "seco", "secr",
-    "sect", "secu", "seed", "seek", "segm", "sele", "sell", "semi", "sena", "seni", "sens", "sent",
-    "seri", "serv", "sess", "sett", "seve", "shad", "shal", "sham", "shar", "shee", "shel", "sher",
-    "shie", "shif", "shin", "ship", "shiv", "shoc", "shoe", "shoo", "shop", "shor", "shou", "shov",
-    "shri", "shru", "shuf", "shy", "sibl", "sick", "side", "sieg", "sigh", "sign", "sile", "silk",
-    "sill", "silv", "simi", "simp", "sinc", "sing", "sire", "sist", "sit", "situ", "six", "size",
-    "skat", "skel", "ski", "skil", "skin", "skir", "skul", "slab", "slam", "slav", "slee", "slen",
-    "slic", "slid", "slig", "slim", "slog", "slot", "slow", "slug", "slus", "smal", "smar", "smil",
-    "smit", "smog", "smoo", "snac", "snai", "snak", "snap", "snif", "snow", "soap", "socc", "soci",
-    "sock", "soda", "sofa", "soft", "sola", "sold", "soli", "solo", "solu", "some", "son", "song",
-    "soon", "sorr", "sort", "soul", "soun", "soup", "sour", "sout", "spac", "spar", "spat", "spaw",
-    "spec", "spee", "spel", "spen", "sphe", "spic", "spid", "spik", "spin", "spir", "spli", "spon",
-    "spoo", "spor", "spot", "spra", "spre", "spri", "spur", "spy", "squa", "stab", "stac", "staf",
-    "stag", "stai", "stak", "stal", "stam", "stan", "star", "stat", "stay", "stea", "stee", "stem",
-    "step", "ster", "stew", "stic", "stil", "stin", "stir", "stoc", "stom", "ston", "stoo", "stor",
-    "stov", "stra", "stre", "stri", "stro", "stru", "stud", "stuf", "stum", "styl", "subj", "subm",
-    "subs", "subt", "such", "sudd", "suff", "suga", "sugg", "suit", "sulp", "summ", "sun", "sunn",
-    "suns", "supe", "supp", "sure", "surf", "surg", "surp", "surr", "surv", "susp", "sust", "swal",
-    "swam", "swan", "swap", "swar", "swea", "swee", "swim", "swin", "swir", "swit", "swor", "symb",
-    "symp", "synd", "syru", "syst", "tabl", "tack", "tact", "tag", "tail", "tale", "talk", "tank",
-    "tape", "targ", "task", "tast", "taxi", "teac", "team", "tell", "temp", "tena", "tend", "tenn",
-    "tens", "term", "terr", "test", "text", "than", "that", "them", "then", "theo", "ther", "thic",
-    "thin", "thir", "this", "thou", "thre", "thri", "thro", "thum", "thun", "tick", "tide", "tidy",
-    "tie", "tige", "tigh", "tilt", "timb", "time", "tiny", "tip", "tire", "tiss", "titl", "toas",
-    "toba", "toda", "todd", "toe", "toge", "toil", "toke", "toma", "tomo", "tone", "toni", "tool",
-    "top", "topi", "topp", "torc", "torn", "tort", "toss", "tota", "tour", "towa", "town", "toy",
-    "trac", "trad", "traf", "trag", "trai", "tran", "trap", "tras", "trav", "tray", "trea", "tree",
-    "trem", "tria", "trib", "tric", "trig", "trim", "trip", "trop", "trou", "truc", "true", "trul",
-    "trus", "tube", "tuna", "tunn", "ture", "turn", "turt", "twin", "twis", "two", "type", "typi",
-    "ugly", "umbr", "unab", "unaw", "uncl", "unco", "unde", "undo", "undr", "unfa", "unfo", "unha",
-    "unif", "unio", "uniq", "unit", "univ", "unkn", "unle", "unli", "unlo", "unpa", "unti", "unus",
-    "unve", "upda", "upgi", "upon", "uppe", "upse", "urba", "urge", "usag", "use", "used", "usef",
-    "usua", "util", "vaca", "vacu", "vagu", "vali", "vall", "valu", "valv", "van", "vani", "vapo",
-    "vari", "vast", "vaul", "vehi", "velv", "vend", "vent", "venu", "verb", "veri", "vers", "very",
-    "vest", "vete", "viab", "vibr", "vici", "vict", "vide", "view", "vill", "vint", "viol", "virt",
-    "viru", "visa", "visi", "vita", "vivi", "voca", "voic", "void", "vola", "volu", "vote", "voya",
-    "vulc", "vuln", "wage", "wago", "wait", "walk", "wall", "waln", "want", "ward", "warn", "warr",
-    "wash", "wasp", "wast", "wate", "wave", "way", "weal", "weap", "wear", "weas", "weat", "web",
-    "wedd", "week", "weig", "weir", "welc", "well", "west", "wet", "whal", "what", "whea", "whee",
-    "wher", "whip", "whis", "wide", "widt", "wife", "wild", "will", "win", "wind", "wine", "wing",
-    "wink", "winn", "wint", "wire", "wisd", "wise", "wish", "witn", "wolf", "woma", "wond", "wood",
-    "wool", "word", "work", "worl", "worr", "wors", "wort", "woun", "wrap", "wrec", "wres", "wris",
-    "writ", "wron", "yard", "year", "yell", "you", "youn", "yout", "zebr", "zero", "zone", "zoo",
-];
+include!("bip39_english.rs");
 
 /// Base58 character set (Bitcoin).
 const BASE58_CHARS: &[u8] = b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
@@ -675,6 +498,23 @@ const PLACEHOLDER_VALUES: &[&str] = &[
     "SAMPLE",
 ];
 
+/// Words that mark a value anywhere inside it as a stand-in, not a secret:
+/// `sk_test_not_a_real_key`, `synthetic-recipient-secret`,
+/// `acme-dev-jwt-secret-CHANGE-ME`.
+const PLACEHOLDER_WORDS: &[&str] = &[
+    "placeholder",
+    "not_a_real",
+    "not-a-real",
+    "notareal",
+    "changeme",
+    "change_me",
+    "change-me",
+    "dummy",
+    "fake",
+    "synthetic",
+    "redacted",
+];
+
 /// Image extensions (filename-only heuristic).
 const IMAGE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "heic", "webp", "gif", "bmp", "tiff"];
 
@@ -758,11 +598,39 @@ pub fn detect_line_context(line: &str) -> LineContext {
 /// Findings default to `LineContext::Code`. Use `check_line_with_context` for
 /// context-aware scanning that adjusts confidence based on comment detection.
 pub fn check_line(line: &str, line_number: usize) -> Vec<ContentFinding> {
+    check_line_cover(line, line_number).0
+}
+
+/// Byte spans of a line that a credential finding already covers.
+type Cover = Vec<(usize, usize)>;
+
+/// Whether `[s, e)` overlaps any covered span.
+fn overlaps(cover: &[(usize, usize)], s: usize, e: usize) -> bool {
+    cover.iter().any(|&(a, b)| s < b && a < e)
+}
+
+/// Byte offset of `part`, a slice of `line`, within `line`.
+fn offset_in(line: &str, part: &str) -> usize {
+    (part.as_ptr() as usize).saturating_sub(line.as_ptr() as usize)
+}
+
+/// End of the URL-like token starting at `pos`: the first whitespace,
+/// quote, backtick or angle bracket.
+fn url_token_end(line: &str, pos: usize) -> usize {
+    line[pos..]
+        .find(|c: char| c.is_whitespace() || matches!(c, '"' | '\'' | '`' | '<' | '>'))
+        .map_or(line.len(), |e| pos + e)
+}
+
+/// `check_line`, plus the spans its credential findings cover (the key,
+/// URL or value each one reports).
+fn check_line_cover(line: &str, line_number: usize) -> (Vec<ContentFinding>, Cover) {
     let mut findings = Vec::new();
+    let mut cover: Cover = Vec::new();
 
     // Skip very short lines
     if line.len() < 4 {
-        return findings;
+        return (findings, cover);
     }
 
     // Fast path for numeric data: plain-ASCII lines whose only letters, if
@@ -782,36 +650,197 @@ pub fn check_line(line: &str, line_number: usize) -> Vec<ContentFinding> {
             .all(|b| !b.is_ascii_alphabetic() || b == b'e' || b == b'E')
     {
         check_credit_card(line, line_number, &mut findings);
-        check_wif_key(line, line_number, &mut findings);
+        check_wif_key(line, line_number, &mut findings, &mut cover);
         check_ssn(line, line_number, &mut findings);
         check_iban(line, line_number, &mut findings);
-        return findings;
+        return (findings, cover);
     }
 
     // Tier 1: Definitive
-    check_pem_header(line, line_number, &mut findings);
-    check_aws_access_key(line, line_number, &mut findings);
-    check_api_key_prefixes(line, line_number, &mut findings);
-    check_google_service_account(line, line_number, &mut findings);
-    check_webhook_urls(line, line_number, &mut findings);
-    check_azure_patterns(line, line_number, &mut findings);
+    check_pem_header(line, line_number, &mut findings, &mut cover);
+    check_aws_access_key(line, line_number, &mut findings, &mut cover);
+    check_api_key_prefixes(line, line_number, &mut findings, &mut cover);
+    check_google_service_account(line, line_number, &mut findings, &mut cover);
+    check_webhook_urls(line, line_number, &mut findings, &mut cover);
+    check_azure_patterns(line, line_number, &mut findings, &mut cover);
 
     // Tier 2: High confidence
-    check_jwt_token(line, line_number, &mut findings);
+    check_jwt_token(line, line_number, &mut findings, &mut cover);
     check_credit_card(line, line_number, &mut findings);
-    check_db_connection_string(line, line_number, &mut findings);
-    check_wif_key(line, line_number, &mut findings);
-    check_eth_hex_key(line, line_number, &mut findings);
-    check_uri_credentials(line, line_number, &mut findings);
+    check_wif_key(line, line_number, &mut findings, &mut cover);
+    check_eth_hex_key(line, line_number, &mut findings, &mut cover);
+    // URLs with credentials cover the whole URL; a key inside one
+    // (`https://x-access-token:ghp_…@github.com`) is still named by its
+    // service below, so these spans join the cover only after Gitleaks.
+    let mut url_cover: Cover = Vec::new();
+    check_db_connection_string(line, line_number, &mut findings, &mut url_cover);
+    check_uri_credentials(line, line_number, &mut findings, &mut url_cover);
+    check_curl_user(line, line_number, &mut findings, &mut cover);
 
-    // Tier 3: Context-dependent
-    check_password_pattern(line, line_number, &mut findings);
+    // Gitleaks' service rules (MIT, converted to Gorse's own matcher), for
+    // the hundreds of services Gorse has no rule of its own for. They always
+    // run, so a second key on a line Gorse already flagged (one-line JSON,
+    // a .env pasted as one line) is still found. A Gitleaks finding is
+    // dropped only when its secret overlaps a span a Gorse key finding
+    // already reports: the same key, listed once.
+    for (f, (s, e)) in crate::rules::check_line_gitleaks_spans(line, line_number) {
+        if !overlaps(&cover, s, e) {
+            cover.push((s, e));
+            findings.push(f);
+        }
+    }
+    cover.extend(url_cover);
+
+    // Tier 3: Context-dependent. A value a service rule already named
+    // needs no generic "password assigned" finding as well; any other
+    // value on the line (a password beside a public identifier) still does.
+    check_password_pattern(line, line_number, &mut findings, &mut cover);
     check_ssn(line, line_number, &mut findings);
     check_iban(line, line_number, &mut findings);
 
     // Tier 4: Sensitive document markings
     check_sensitive_markings(line, line_number, &mut findings);
 
+    (findings, cover)
+}
+
+/// Whether one segment of an upper-case `.env` name (split at `_`, `.`,
+/// `-`) names a secret: PASSWORD, PGPASSWORD, SECRET, CREDENTIALS, TOKEN,
+/// AUTHTOKEN, KEY, APIKEY, PASS, PWD. TOKENIZER and KEYBOARD do not.
+fn env_secret_segment(seg: &str) -> bool {
+    ["PASSWORD", "PASSWD", "SECRET", "CREDENTIAL", "PASSPHRASE"]
+        .iter()
+        .any(|w| seg.contains(w))
+        || matches!(seg, "PASS" | "PWD" | "PW" | "KEY" | "KEYS" | "PIN")
+        || seg.ends_with("TOKEN")
+        || seg.ends_with("TOKENS")
+        || [
+            "APIKEY",
+            "PRIVKEY",
+            "PRIVATEKEY",
+            "ACCESSKEY",
+            "SECRETKEY",
+            "AUTHKEY",
+            "MASTERKEY",
+        ]
+        .iter()
+        .any(|w| seg.ends_with(w))
+}
+
+/// Name endings that describe a secret rather than hold one
+/// (`PRIVATE_KEY_PATH`, `TOKEN_URL`, `API_KEY_ID`).
+const ENV_NON_SECRET_SUFFIXES: &[&str] = &[
+    "_ID",
+    "_IDS",
+    "_PATH",
+    "_FILE",
+    "_DIR",
+    "_URL",
+    "_URI",
+    "_ENDPOINT",
+    "_HOST",
+    "_PORT",
+    "_NAME",
+    "_TYPE",
+    "_USER",
+    "_USERNAME",
+    "_REGION",
+    "_VERSION",
+    "_LENGTH",
+    "_LEN",
+    "_SIZE",
+    "_TTL",
+    "_EXPIRY",
+    "_EXPIRES",
+    "_SECONDS",
+    "_HEADER",
+    "_ALGORITHM",
+    "_ALG",
+    "_ENABLED",
+    "_FORMAT",
+];
+
+/// `NAME=value` or `export NAME=value` (`.env` syntax): the name and the
+/// value with its quotes and any trailing ` # comment` removed.
+fn env_assignment(line: &str) -> Option<(&str, &str)> {
+    let t = line.trim_start();
+    let t = t.strip_prefix("export ").map_or(t, str::trim_start);
+    let name_end =
+        t.find(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-')))?;
+    let name = &t[..name_end];
+    if name.is_empty() || !name.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_') {
+        return None;
+    }
+    let rest = t[name_end..].trim_start_matches([' ', '\t']);
+    let rest = rest.strip_prefix('=')?.trim_start_matches([' ', '\t']);
+    let value = match rest.chars().next() {
+        Some(q @ ('"' | '\'')) => {
+            let inner = &rest[1..];
+            &inner[..inner.find(q).unwrap_or(inner.len())]
+        }
+        _ => {
+            let v = match rest.find(" #").or_else(|| rest.find("\t#")) {
+                Some(c) => &rest[..c],
+                None => rest,
+            };
+            v.trim_end()
+        }
+    };
+    Some((name, value))
+}
+
+/// Checks one line of a `.env`-style file. A `NAME=value` (optionally
+/// `export NAME=value`) whose name holds a password, secret, token or key
+/// word reports its value as a literal secret whenever the value is not
+/// empty, not a placeholder and not an interpolation (`$VAR`, `${VAR}`).
+/// A `.env` file holds values, not code, so the code-shape rules that keep
+/// `check_line` quiet on source files (`correct_horse_battery_staple`
+/// reads as a snake_case name there) do not apply. Everything else on the
+/// line is checked as `check_line` does.
+pub fn check_env_line(line: &str, line_number: usize) -> Vec<ContentFinding> {
+    let (mut findings, cover) = check_line_cover(line, line_number);
+    let Some((name, value)) = env_assignment(line) else {
+        return findings;
+    };
+    let upper = name.to_ascii_uppercase();
+    let secret_name = upper.split(['_', '.', '-']).any(env_secret_segment)
+        && !ENV_NON_SECRET_SUFFIXES.iter().any(|s| upper.ends_with(s))
+        && !upper.contains("PUBLIC")
+        && !upper.contains("PUBLISHABLE");
+    if !secret_name || value.len() < 4 {
+        return findings;
+    }
+    let lower = value.to_ascii_lowercase();
+    let interpolation = value.starts_with('$') || value.contains("${") || value.contains("{{");
+    let placeholder = PLACEHOLDER_VALUES
+        .iter()
+        .any(|p| lower == p.to_ascii_lowercase())
+        || ["xxx", "your-", "your_", "<", "change", "replace", "insert"]
+            .iter()
+            .any(|p| lower.starts_with(p))
+        || PLACEHOLDER_WORDS.iter().any(|w| lower.contains(w))
+        || value.chars().all(|c| c == '*' || c == 'x' || c == 'X');
+    // A bare number is a setting (`TOKEN_REFRESH_MINUTES=30`) unless the
+    // name says password.
+    let number_setting = value.chars().all(|c| c.is_ascii_digit())
+        && !["PASS", "PWD", "SECRET", "PIN"]
+            .iter()
+            .any(|w| upper.contains(w));
+    if interpolation || placeholder || number_setting {
+        return findings;
+    }
+    let s = offset_in(line, value);
+    if overlaps(&cover, s, s + value.len()) {
+        return findings;
+    }
+    findings.push(ContentFinding {
+        secret_type: ContentSecretType::PasswordPattern,
+        confidence: Confidence::High,
+        context: LineContext::Code,
+        line_number,
+        redacted_preview: format!("{}=****", safe_prefix(name, 40)),
+        description: "Password or secret value assigned in plain text",
+    });
     findings
 }
 
@@ -934,7 +963,7 @@ pub fn check_multi_line(lines: &[&str]) -> Vec<ContentFinding> {
 
 /// Check an image filename for suspicious keywords.
 pub fn check_image_filename(filename: &str) -> Option<ContentFinding> {
-    let lower = filename.to_lowercase();
+    let lower = filename.to_ascii_lowercase();
 
     // Check extension
     let is_image = IMAGE_EXTENSIONS.iter().any(|ext| lower.ends_with(ext));
@@ -981,12 +1010,18 @@ fn contains_word(haystack: &str, keyword: &str) -> bool {
 
 // ─── Tier 1: Definitive ──────────────────────────────────────────────────────
 
-fn check_pem_header(line: &str, line_number: usize, findings: &mut Vec<ContentFinding>) {
-    if !line.contains("-----BEGIN ") {
+fn check_pem_header(
+    line: &str,
+    line_number: usize,
+    findings: &mut Vec<ContentFinding>,
+    cover: &mut Cover,
+) {
+    let Some(begin) = line.find("-----BEGIN ") else {
         return;
-    }
+    };
     for suffix in PEM_PRIVATE_SUFFIXES {
-        if line.contains(suffix) {
+        if let Some(at) = line.find(suffix) {
+            cover.push((begin.min(at), (at + suffix.len()).max(begin + 11)));
             findings.push(ContentFinding {
                 secret_type: ContentSecretType::PemPrivateKey,
                 confidence: Confidence::Definitive,
@@ -1001,7 +1036,12 @@ fn check_pem_header(line: &str, line_number: usize, findings: &mut Vec<ContentFi
     }
 }
 
-fn check_aws_access_key(line: &str, line_number: usize, findings: &mut Vec<ContentFinding>) {
+fn check_aws_access_key(
+    line: &str,
+    line_number: usize,
+    findings: &mut Vec<ContentFinding>,
+    cover: &mut Cover,
+) {
     // AWS access keys start with AKIA followed by 16 alphanumeric chars [A-Z2-7]
     let mut start = 0;
     while let Some(pos) = line[start..].find("AKIA") {
@@ -1013,6 +1053,7 @@ fn check_aws_access_key(line: &str, line_number: usize, findings: &mut Vec<Conte
                 .all(|c| c.is_ascii_uppercase() || ('2'..='7').contains(&c))
             {
                 let preview = format!("AKIA{}****", &candidate[..4]);
+                cover.push((abs_pos, abs_pos + 20));
                 findings.push(ContentFinding {
                     secret_type: ContentSecretType::AwsAccessKey,
                     confidence: Confidence::Definitive,
@@ -1028,9 +1069,21 @@ fn check_aws_access_key(line: &str, line_number: usize, findings: &mut Vec<Conte
     }
 }
 
-fn check_api_key_prefixes(line: &str, line_number: usize, findings: &mut Vec<ContentFinding>) {
+fn check_api_key_prefixes(
+    line: &str,
+    line_number: usize,
+    findings: &mut Vec<ContentFinding>,
+    cover: &mut Cover,
+) {
+    // Every distinct key on the line is reported (one-line JSON can hold
+    // two tokens of one service); a token two prefixes both match
+    // (`sk-proj-…` and `sk-`) is reported once, by the first.
+    let mut reported: Vec<(usize, usize)> = Vec::new();
     for &(prefix, min_len, service) in API_KEY_PREFIXES {
         for (pos, _) in line.match_indices(prefix) {
+            if overlaps(&reported, pos, pos + 1) {
+                continue;
+            }
             // The prefix must start a token: "re_" inside "pre_bind" or a
             // path is not a Resend key.
             if let Some(before) = line[..pos].chars().next_back() {
@@ -1039,18 +1092,15 @@ fn check_api_key_prefixes(line: &str, line_number: usize, findings: &mut Vec<Con
                     continue;
                 }
             }
-            // Extract the token: run forward until whitespace, quote, or end
+            // Extract the token: run forward until whitespace, a quote, a
+            // separator, or a URL query separator (`?key=AIza…&callback=`
+            // ends the key at `&`; `#` starts a fragment).
             let token_start = pos;
             let rest = &line[token_start..];
             let token_end = rest
                 .find(|c: char| {
                     c.is_whitespace()
-                        || c == '"'
-                        || c == '\''
-                        || c == ','
-                        || c == ';'
-                        || c == ')'
-                        || c == '}'
+                        || matches!(c, '"' | '\'' | ',' | ';' | ')' | '}' | '&' | '?' | '#')
                 })
                 .unwrap_or(rest.len());
             let token = &rest[..token_end];
@@ -1059,19 +1109,29 @@ fn check_api_key_prefixes(line: &str, line_number: usize, findings: &mut Vec<Con
             // expression is not.
             let dotted = prefix.ends_with('.') || prefix == "pat";
             if token.contains([
-                '/', '\\', '+', '=', ':', '(', '[', '{', '<', '>', '*', '?', '&', '%', '$', '@',
+                '/', '\\', '+', '=', ':', '(', '[', '{', '<', '>', '*', '%', '$', '@',
             ]) || (!dotted && token.contains('.'))
             {
                 continue;
             }
             // Short prefixes also start ordinary names (re_render_all,
             // hf_scale_v2). Keys of those services carry digits or capitals,
-            // and never read as snake_case or kebab-case words.
+            // and never read as snake_case or kebab-case words. A lowercase
+            // value with separators is a key only when one of its parts is a
+            // long random run of letters and digits (`dapi<32 hex>-2`).
             if prefix.len() <= 4 {
                 let suffix = &token[prefix.len().min(token.len())..];
                 let upper = suffix.chars().any(|c| c.is_ascii_uppercase());
                 let digit = suffix.chars().any(|c| c.is_ascii_digit());
-                if (!upper && !digit) || (!upper && suffix.contains(['_', '-'])) {
+                let random_part = || {
+                    suffix.split(['_', '-']).any(|part| {
+                        part.len() >= 16
+                            && part.chars().any(|c| c.is_ascii_digit())
+                            && part.chars().any(|c| c.is_ascii_alphabetic())
+                            && shannon_entropy(part) >= ENTROPY_THRESHOLD_API_KEY
+                    })
+                };
+                if (!upper && !digit) || (!upper && suffix.contains(['_', '-']) && !random_part()) {
                     continue;
                 }
             }
@@ -1102,6 +1162,8 @@ fn check_api_key_prefixes(line: &str, line_number: usize, findings: &mut Vec<Con
 
                 let preview_len = prefix.len().min(8);
                 let preview = format!("{}****", &token[..preview_len]);
+                reported.push((pos, pos + token.len()));
+                cover.push((pos, pos + token.len()));
                 findings.push(ContentFinding {
                     secret_type: ContentSecretType::ApiKey { service },
                     confidence: Confidence::Definitive,
@@ -1123,7 +1185,6 @@ fn check_api_key_prefixes(line: &str, line_number: usize, findings: &mut Vec<Con
                         _ => "API key or access token for external service",
                     },
                 });
-                return;
             }
         }
     }
@@ -1133,10 +1194,12 @@ fn check_google_service_account(
     line: &str,
     line_number: usize,
     findings: &mut Vec<ContentFinding>,
+    cover: &mut Cover,
 ) {
     // Google service account JSON has both "type" and "service_account"
-    let lower = line.to_lowercase();
-    if lower.contains("\"type\"") && lower.contains("service_account") {
+    let lower = line.to_ascii_lowercase();
+    if let (true, Some(at)) = (lower.contains("\"type\""), lower.find("service_account")) {
+        cover.push((at, at + "service_account".len()));
         findings.push(ContentFinding {
             secret_type: ContentSecretType::GoogleServiceAccount,
             confidence: Confidence::Definitive,
@@ -1150,7 +1213,12 @@ fn check_google_service_account(
 
 // ─── Tier 2: High Confidence ─────────────────────────────────────────────────
 
-fn check_jwt_token(line: &str, line_number: usize, findings: &mut Vec<ContentFinding>) {
+fn check_jwt_token(
+    line: &str,
+    line_number: usize,
+    findings: &mut Vec<ContentFinding>,
+    cover: &mut Cover,
+) {
     // JWT: eyJ + base64url + . + base64url + . + base64url
     let mut start = 0;
     while let Some(pos) = line[start..].find("eyJ") {
@@ -1174,6 +1242,7 @@ fn check_jwt_token(line: &str, line_number: usize, findings: &mut Vec<ContentFin
                 && is_base64url(parts[0])
                 && is_base64url(parts[1])
             {
+                cover.push((abs_pos, abs_pos + token.len()));
                 findings.push(ContentFinding {
                     secret_type: ContentSecretType::JwtToken,
                     confidence: Confidence::High,
@@ -1235,9 +1304,10 @@ fn card_candidates(line: &str) -> Vec<String> {
         let before = start.checked_sub(1).map(|j| b[j]);
         let after = b.get(end).copied();
         let after2 = b.get(end + 1).copied();
-        let decimal = matches!(before, Some(b'.') | Some(b','))
-            || (matches!(after, Some(b'.') | Some(b','))
-                && after2.is_some_and(|c| c.is_ascii_digit()));
+        // Only `.` marks a decimal; `,` separates fields (CSV rows such as
+        // `name,4532…,1225,123`) and digit groups, never a card's digits.
+        let decimal = before == Some(b'.')
+            || (after == Some(b'.') && after2.is_some_and(|c| c.is_ascii_digit()));
         let glued = before.is_some_and(|c| c.is_ascii_alphabetic() || c == b'_')
             || after.is_some_and(|c| c.is_ascii_alphabetic() || c == b'_');
         if (13..=19).contains(&digits.len()) && !decimal && !glued {
@@ -1285,14 +1355,27 @@ fn check_card_digits(pure_digits: &str, line_number: usize, findings: &mut Vec<C
     }
 }
 
-fn check_db_connection_string(line: &str, line_number: usize, findings: &mut Vec<ContentFinding>) {
-    let lower = line.to_lowercase();
+fn check_db_connection_string(
+    line: &str,
+    line_number: usize,
+    findings: &mut Vec<ContentFinding>,
+    cover: &mut Cover,
+) {
+    let lower = line.to_ascii_lowercase();
+    // Every occurrence of every scheme: `postgres://localhost/db` first and
+    // `postgres://app:pw@db` later on the same line is still found.
     for prefix in DB_PREFIXES {
-        if let Some(pos) = lower.find(prefix) {
-            let rest = &line[pos..];
-            // Must contain @ (embedded credentials)
-            if rest.contains('@') {
+        for (pos, _) in lower.match_indices(prefix) {
+            // `postgres://` inside `postgresql://` style overlaps, or a URL
+            // already reported.
+            if overlaps(cover, pos, pos + 1) {
+                continue;
+            }
+            let end = url_token_end(line, pos);
+            // Must contain @ (embedded credentials) within the URL itself.
+            if line[pos..end].contains('@') {
                 let scheme = prefix.trim_end_matches("://");
+                cover.push((pos, end));
                 findings.push(ContentFinding {
                     secret_type: ContentSecretType::DbConnectionString,
                     confidence: Confidence::High,
@@ -1301,13 +1384,17 @@ fn check_db_connection_string(line: &str, line_number: usize, findings: &mut Vec
                     redacted_preview: format!("{scheme}://****@****"),
                     description: "Database connection string with embedded credentials",
                 });
-                return;
             }
         }
     }
 }
 
-fn check_wif_key(line: &str, line_number: usize, findings: &mut Vec<ContentFinding>) {
+fn check_wif_key(
+    line: &str,
+    line_number: usize,
+    findings: &mut Vec<ContentFinding>,
+    cover: &mut Cover,
+) {
     // WIF private keys: start with '5' (len 51) or 'K'/'L' (len 52)
     for word in line.split_whitespace() {
         let trimmed = word.trim_matches(|c: char| !c.is_alphanumeric());
@@ -1317,6 +1404,8 @@ fn check_wif_key(line: &str, line_number: usize, findings: &mut Vec<ContentFindi
             _ => false,
         };
         if valid && is_base58(trimmed) {
+            let at = offset_in(line, trimmed);
+            cover.push((at, at + trimmed.len()));
             findings.push(ContentFinding {
                 secret_type: ContentSecretType::WifPrivateKey,
                 confidence: Confidence::High,
@@ -1330,187 +1419,1090 @@ fn check_wif_key(line: &str, line_number: usize, findings: &mut Vec<ContentFindi
     }
 }
 
-fn check_eth_hex_key(line: &str, line_number: usize, findings: &mut Vec<ContentFinding>) {
-    // 0x + 64 hex chars. Use .get() to avoid panicking on multi-byte UTF-8.
-    if let Some(pos) = line.find("0x") {
+/// Words in a name that say a 64-hex value is a private key.
+const HEX_KEY_WORDS: &[&str] = &[
+    "privatekey",
+    "privkey",
+    "secretkey",
+    "signingkey",
+    "signerkey",
+    "walletkey",
+    "deployerkey",
+    "accountkey",
+    "ethkey",
+    "mnemonic",
+    "wallet",
+    "secret",
+];
+
+/// Further words that make the *name* a value is assigned to a key name
+/// (`accounts: ["0x…"]`, `OPERATOR_KEY`, `signer`). Elsewhere on a line
+/// they are too common to count.
+const HEX_NAME_KEY_WORDS: &[&str] = &["private", "account", "signer", "operator", "deployer"];
+
+/// Words in a name that say a 64-hex value is a hash, slot, root or other
+/// public constant. Code is full of these; a key is not.
+const HEX_HASH_WORDS: &[&str] = &[
+    "hash",
+    "slot",
+    "root",
+    "salt",
+    "topic",
+    "selector",
+    "digest",
+    "checksum",
+    "txid",
+    "bytes32",
+    "constant",
+    "commit",
+    "nonce",
+    "sha1",
+    "sha256",
+    "sha512",
+    "etag",
+    "fingerprint",
+    "public",
+    "pubkey",
+    "address",
+    "storage",
+    "cache",
+];
+
+/// Lowercase, without `_`, `-`, spaces and tabs: "ROOT_PRIVATE_KEY" ->
+/// "rootprivatekey".
+fn squash(s: &str) -> String {
+    s.chars()
+        .filter(|c| !matches!(c, '_' | '-' | ' ' | '\t'))
+        .map(|c| c.to_ascii_lowercase())
+        .collect()
+}
+
+/// The name a value at `pos` is assigned to: the text left of the last `=`
+/// or `:` before it, back to the previous statement or field separator
+/// (`ROOT_PRIVATE_KEY` in `ROOT_PRIVATE_KEY=0x…`). Empty when the value is
+/// not assigned to anything.
+fn assigned_name(line: &str, pos: usize) -> &str {
+    let before = &line[..pos];
+    let Some(op) = before.rfind(['=', ':']) else {
+        return "";
+    };
+    let name = &before[..op];
+    match name.rfind([';', ',', '{', '(', '[']) {
+        Some(sep) => &name[sep + 1..],
+        None => name,
+    }
+}
+
+/// What the assigned name says about a 64-hex value: Some(true) a key,
+/// Some(false) a hash or constant, None nothing. The word nearer the end of
+/// the name wins, so "ROOT_PRIVATE_KEY" is a key and "PRIVATE_KEY_SHA256"
+/// or "bytes32 constant ROLE_HASH" is not. Key words are those of
+/// `HEX_KEY_WORDS` and a name ending in `pk` (`DEPLOYER_PK`, `{pk: …}`);
+/// with `key_suffix`, any name ending in `key` or `keys` (`ADMIN_KEY`,
+/// `const key`) too, which is said only of `0x` values: a bare 64-hex
+/// value beside `must_match_key` is a checksum.
+fn hex_name_verdict(name: &str, key_suffix: bool) -> Option<bool> {
+    // Solidity visibility words (`bytes32 private immutable X`) say
+    // nothing about the value.
+    let name: String = name
+        .split_whitespace()
+        .filter(|w| {
+            !matches!(
+                *w,
+                "private" | "public" | "internal" | "external" | "immutable"
+            )
+        })
+        .flat_map(str::chars)
+        .filter(char::is_ascii_alphanumeric)
+        .map(|c| c.to_ascii_lowercase())
+        .collect();
+    let last_end = |words: &[&str]| {
+        words
+            .iter()
+            .filter_map(|w| name.rfind(w).map(|i| i + w.len()))
+            .max()
+    };
+    // A key suffix counts from where it starts, so a hash word just before
+    // it still wins (`publicKey`, `cacheKey`, `storageKey`).
+    let suffix_start = ["pk"]
+        .iter()
+        .chain(if key_suffix {
+            &["keys", "key"][..]
+        } else {
+            &[][..]
+        })
+        .find(|w| name.ends_with(*w))
+        .map(|w| name.len() - w.len());
+    let key = suffix_start
+        .max(last_end(HEX_KEY_WORDS))
+        .max(last_end(HEX_NAME_KEY_WORDS));
+    match (key, last_end(HEX_HASH_WORDS)) {
+        (Some(k), Some(h)) => Some(k > h),
+        (Some(_), None) => Some(true),
+        (None, Some(_)) => Some(false),
+        (None, None) => None,
+    }
+}
+
+/// Whether what follows a value is nothing or only a comment
+/// (`0x…  // my main account`).
+fn only_comment_after(rest: &str) -> bool {
+    let rest = rest.trim();
+    rest.is_empty()
+        || ["//", "#", "--", "/*", ";"]
+            .iter()
+            .any(|c| rest.starts_with(c))
+}
+
+/// Whether a 0x-prefixed 64-hex value at `pos` reads as a private key.
+/// Such values are mostly hashes, storage slots, roots and test vectors in
+/// code; a key comes with words that say so, or is pasted on its own line.
+/// The name the value is assigned to decides first; only when it says
+/// nothing do words elsewhere on the line count (a key word, and no hash
+/// word anywhere). A comment such as `# do not commit` never outweighs
+/// `PRIVATE_KEY=`.
+fn hex_key_context(line: &str, pos: usize) -> bool {
+    if let Some(verdict) = hex_name_verdict(assigned_name(line, pos), true) {
+        return verdict;
+    }
+    let squashed = squash(line);
+    if HEX_HASH_WORDS.iter().any(|w| squashed.contains(w)) {
+        return false;
+    }
+    if HEX_KEY_WORDS.iter().any(|w| squashed.contains(w)) {
+        return true;
+    }
+    // Pasted on its own (a note, a text file): nothing else on the line but
+    // a comment.
+    line[..pos].trim().is_empty() && line.get(pos + 66..).is_some_and(only_comment_after)
+}
+
+fn check_eth_hex_key(
+    line: &str,
+    line_number: usize,
+    findings: &mut Vec<ContentFinding>,
+    cover: &mut Cover,
+) {
+    // 0x + 64 hex chars, at every `0x` on the line. Use .get() to avoid
+    // panicking on multi-byte UTF-8.
+    for (pos, _) in line.match_indices("0x") {
         let after = &line[pos + 2..];
-        if let Some(candidate) = after.get(..64) {
-            if candidate.chars().all(|c| c.is_ascii_hexdigit()) {
-                // Reject EVM bytecode: if hex continues well past 64 chars, it's
-                // contract bytecode (often thousands of hex chars), not a private key.
-                let remaining = &after[64..];
-                let extra_hex = remaining
-                    .chars()
-                    .take_while(|c| c.is_ascii_hexdigit())
-                    .count();
-                if extra_hex > 16 {
-                    return; // bytecode, not a key
-                }
-                // Entropy check: reject repeated patterns like "aabbccdd" x 8
-                if shannon_entropy(candidate) < ENTROPY_THRESHOLD_HEX_KEY {
-                    return;
-                }
-                // D-23: False positive filter
-                if is_false_positive(candidate) {
-                    return;
-                }
-                let preview_end = &candidate[..8]; // safe: all ASCII hex
-                findings.push(ContentFinding {
-                    secret_type: ContentSecretType::EthHexKey,
-                    confidence: Confidence::High,
-                    context: LineContext::Code,
-                    line_number,
-                    redacted_preview: format!("0x{preview_end}****"),
-                    description:
-                        "Ethereum/EVM hex private key — grants full control of crypto wallet",
-                });
-                return;
-            }
+        let Some(candidate) = after.get(..64) else {
+            continue;
+        };
+        if !candidate.chars().all(|c| c.is_ascii_hexdigit()) || !hex_key_context(line, pos) {
+            continue;
         }
+        // Reject EVM bytecode: if hex continues well past 64 chars, it's
+        // contract bytecode (often thousands of hex chars), not a private key.
+        let extra_hex = after[64..]
+            .chars()
+            .take_while(|c| c.is_ascii_hexdigit())
+            .count();
+        if extra_hex > 16 {
+            continue; // bytecode, not a key
+        }
+        // Entropy check: reject repeated patterns like "aabbccdd" x 8
+        if shannon_entropy(candidate) < ENTROPY_THRESHOLD_HEX_KEY {
+            continue;
+        }
+        // D-23: False positive filter
+        if is_false_positive(candidate) {
+            continue;
+        }
+        let preview_end = &candidate[..8]; // safe: all ASCII hex
+        cover.push((pos, pos + 66));
+        findings.push(ContentFinding {
+            secret_type: ContentSecretType::EthHexKey,
+            confidence: Confidence::High,
+            context: LineContext::Code,
+            line_number,
+            redacted_preview: format!("0x{preview_end}****"),
+            description: "Ethereum/EVM hex private key — grants full control of crypto wallet",
+        });
+        return;
     }
 
-    // 64 hex chars near a keyword
-    let lower = line.to_lowercase();
+    // 64 hex chars near a keyword.
     // "key" and "hex" alone also sit beside every SHA-256 checksum
     // ("must_match_key", sha256sum listings); a wallet key comes with words
     // like these, and a line about hashes is about hashes.
-    let has_keyword = [
-        "private", "priv_key", "privkey", "wallet", "secret", "signer", "mnemonic", "eth_key",
-        "evm",
-    ]
-    .iter()
-    .any(|w| lower.contains(w))
-        && ![
-            "sha256",
-            "sha-256",
-            "sha512",
-            "hash",
-            "digest",
-            "checksum",
-            "etag",
-            "commit",
-            "fingerprint",
+    let line_says_key = || {
+        let lower = line.to_ascii_lowercase();
+        [
+            "private", "priv_key", "privkey", "wallet", "secret", "signer", "mnemonic", "eth_key",
+            "evm",
         ]
         .iter()
-        .any(|w| lower.contains(w));
-    if has_keyword {
-        // Every run of hex digits, so "PRIVATE_KEY=<hex>" and "0x<hex>" count.
-        for trimmed in line.split(|c: char| !c.is_ascii_hexdigit()) {
-            if trimmed.len() == 64
-                && trimmed.chars().all(|c| c.is_ascii_hexdigit())
-                && shannon_entropy(trimmed) >= ENTROPY_THRESHOLD_HEX_KEY
-            {
-                findings.push(ContentFinding {
-                    secret_type: ContentSecretType::EthHexKey,
-                    confidence: Confidence::High,
-                    context: LineContext::Code,
-                    line_number,
-                    redacted_preview: format!("{}****", safe_prefix(trimmed, 8)),
-                    description: "Possible Ethereum/EVM hex private key near crypto keyword",
-                });
-                return;
-            }
+        .any(|w| lower.contains(w))
+            && ![
+                "sha256",
+                "sha-256",
+                "sha512",
+                "hash",
+                "digest",
+                "checksum",
+                "etag",
+                "commit",
+                "fingerprint",
+                "slot",
+                "root",
+                "salt",
+                "bytes32",
+                "constant",
+                "topic",
+                "selector",
+            ]
+            .iter()
+            .any(|w| lower.contains(w))
+    };
+    // Every run of hex digits, so "PRIVATE_KEY=<hex>" and "0x<hex>" count.
+    // The name each run is assigned to decides first, as for 0x values.
+    let b = line.as_bytes();
+    let mut i = 0;
+    while i < b.len() {
+        if !b[i].is_ascii_hexdigit() {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        while i < b.len() && b[i].is_ascii_hexdigit() {
+            i += 1;
+        }
+        // ASCII hex digits only, so both ends are character boundaries.
+        let run = &line[start..i];
+        if run.len() != 64 || shannon_entropy(run) < ENTROPY_THRESHOLD_HEX_KEY {
+            continue;
+        }
+        // D-23: False positive filter, as for 0x values.
+        if is_false_positive(run) {
+            continue;
+        }
+        if hex_name_verdict(assigned_name(line, start), false).unwrap_or_else(line_says_key) {
+            cover.push((start, i));
+            findings.push(ContentFinding {
+                secret_type: ContentSecretType::EthHexKey,
+                confidence: Confidence::High,
+                context: LineContext::Code,
+                line_number,
+                redacted_preview: format!("{}****", safe_prefix(run, 8)),
+                description: "Possible Ethereum/EVM hex private key near crypto keyword",
+            });
+            return;
         }
     }
 }
 
 // ─── Tier 3: Context-Dependent ───────────────────────────────────────────────
 
-fn check_password_pattern(line: &str, line_number: usize, findings: &mut Vec<ContentFinding>) {
-    let lower = line.to_lowercase();
+fn check_password_pattern(
+    line: &str,
+    line_number: usize,
+    findings: &mut Vec<ContentFinding>,
+    cover: &mut Cover,
+) {
+    let lower = line.to_ascii_lowercase();
     for keyword in PASSWORD_KEYWORDS {
-        if let Some(kw_pos) = lower.find(keyword) {
-            // Look for assignment after the keyword
-            let after_kw = &line[kw_pos + keyword.len()..];
-            let trimmed = after_kw.trim_start();
+        // Every occurrence: `"auth_mode": "pass_through", "pass": "…"` holds
+        // the keyword twice and only the second is assigned.
+        for (kw_pos, _) in lower.match_indices(keyword) {
+            let Some((value, op)) = password_value(line, kw_pos, keyword) else {
+                continue;
+            };
+            // A value a credential finding (or an earlier keyword) already
+            // reports is not reported again.
+            let vs = offset_in(line, value);
+            if overlaps(cover, vs, vs + value.len()) {
+                continue;
+            }
+            cover.push((vs, vs + value.len()));
+            let redacted_kw = &line[kw_pos..kw_pos + keyword.len()];
+            // A UUID under `token` or `key` is as often a record id as a
+            // credential: kept, at a lower likelihood.
+            let confidence = if uuid_shaped(value) {
+                Confidence::Heuristic
+            } else {
+                Confidence::ContextDependent
+            };
+            findings.push(ContentFinding {
+                secret_type: ContentSecretType::PasswordPattern,
+                confidence,
+                context: LineContext::Code,
+                line_number,
+                redacted_preview: format!("{redacted_kw} {op} ****"),
+                description: "Password or secret value assigned in plain text",
+            });
+        }
+    }
+}
 
-            for op in ASSIGNMENT_OPS {
-                if trimmed.starts_with(op) {
-                    let Some(value) = assigned_value(&trimmed[op.len()..]) else {
-                        break;
-                    };
+/// Whether a keyword names a password or secret itself (`password`,
+/// `pass`, `client_secret`), rather than a token or key.
+fn password_keyword(keyword: &str) -> bool {
+    keyword.contains("pass") || keyword.contains("secret")
+}
 
-                    if value.is_empty() || value.len() < 4 {
-                        break;
+/// `8-4-4-4-12` hex: a UUID.
+fn uuid_shaped(value: &str) -> bool {
+    value.len() == 36
+        && value.char_indices().all(|(i, c)| {
+            if matches!(i, 8 | 13 | 18 | 23) {
+                c == '-'
+            } else {
+                c.is_ascii_hexdigit()
+            }
+        })
+}
+
+/// Words that, beside a password keyword in a key name, say the key
+/// describes a password field rather than holds a password:
+/// `passwordLabel`, `password_hint`, `token_url`, `has_password`,
+/// `secret_name`, `private_key_path`.
+const UI_KEY_WORDS: &[&str] = &[
+    "label",
+    "placeholder",
+    "hint",
+    "title",
+    "message",
+    "error",
+    "required",
+    "prompt",
+    "help",
+    "text",
+    "description",
+    "field",
+    "input",
+    "rule",
+    "rules",
+    "policy",
+    "strength",
+    "confirm",
+    "confirmation",
+    "reset",
+    "forgot",
+    "change",
+    "changed",
+    "visible",
+    "show",
+    "hide",
+    "toggle",
+    "mismatch",
+    "length",
+    "min",
+    "max",
+    "pattern",
+    "validation",
+    "invalid",
+    "empty",
+    "blank",
+    "tooltip",
+    "caption",
+    "header",
+    "heading",
+    "button",
+    "link",
+    "icon",
+    "type",
+    "kind",
+    "mode",
+    "format",
+    "status",
+    "state",
+    "enabled",
+    "disabled",
+    "expiry",
+    "expires",
+    "expired",
+    "age",
+    "count",
+    "attempts",
+    "retries",
+    "timeout",
+    "ttl",
+    "url",
+    "uri",
+    "path",
+    "file",
+    "dir",
+    "name",
+    "id",
+    "index",
+    "version",
+    "hash",
+    "salt",
+    "algorithm",
+    "method",
+    "scheme",
+    "provider",
+    "source",
+    "scope",
+    "role",
+    "group",
+    "user",
+    "username",
+    "email",
+    "domain",
+    "host",
+    "has",
+    "is",
+    "use",
+    "no",
+    "wrong",
+    "enter",
+    "your",
+    "with",
+    "require",
+    "requires",
+    "validate",
+    "check",
+    "verify",
+];
+
+/// One word that may precede a bare password name and keep it bare:
+/// `db_password`, `NEW_PASS`, `admin_secret`, `PGPASSWORD`.
+const BARE_KEY_PREFIXES: &[&str] = &[
+    "new",
+    "old",
+    "current",
+    "db",
+    "admin",
+    "root",
+    "api",
+    "app",
+    "service",
+    "client",
+    "master",
+    "access",
+    "refresh",
+    "session",
+    "jwt",
+    "signing",
+    "encryption",
+    "private",
+    "secret",
+    "key",
+    "pg",
+    "wifi",
+    "smtp",
+    "ssh",
+    "sudo",
+    "ldap",
+    "mysql",
+    "redis",
+    "ftp",
+];
+
+/// Keywords that name a password outright: a sentence assigned to one of
+/// these (bare, or behind one `BARE_KEY_PREFIXES` word) may be a pass
+/// phrase.
+const BARE_PASSWORD_NAMES: &[&str] = &["password", "passphrase", "pass", "passwd", "pwd", "secret"];
+
+/// What the key holding a password keyword says about its value.
+#[derive(Clone, Copy)]
+struct KeyName {
+    /// The keyword is a password or secret word (`password`, `pass`,
+    /// `client_secret`), not a token or key: a few code-like shapes are
+    /// a password after all (`!MintyRidge42`, `AutumnRiver42`).
+    password: bool,
+    /// The key is a bare password name (`password`, `DB_PASSWORD`,
+    /// `new_pass`): a quoted sentence may be a pass phrase.
+    bare: bool,
+}
+
+/// The words of a key name other than the keyword, lower-cased:
+/// `passwordLabel` -> ["label"], `DB_PASSWORD` -> ["db"], `PGPASSWORD` ->
+/// ["pg"], `has_password` -> ["has"], `api_key` -> ["api", "key"].
+fn key_words(ident: &str, keyword: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    for piece in ident.split(['_', '-', '$']).filter(|p| !p.is_empty()) {
+        // A SCREAMING_CASE piece is one word; a camelCase piece splits
+        // at each capital.
+        let parts = if piece.chars().any(|c| c.is_ascii_lowercase()) {
+            split_capitals(piece)
+        } else {
+            vec![piece]
+        };
+        for part in parts {
+            let lower = part.to_ascii_lowercase();
+            match lower.find(keyword) {
+                Some(i) => {
+                    let (before, after) = (&lower[..i], &lower[i + keyword.len()..]);
+                    if !before.is_empty() {
+                        words.push(before.to_string());
                     }
-
-                    // Check it's not a placeholder
-                    let is_placeholder = PLACEHOLDER_VALUES
-                        .iter()
-                        .any(|p| value.starts_with(p) || value == *p);
-                    if is_placeholder {
-                        break;
+                    if !after.is_empty() {
+                        words.push(after.to_string());
                     }
-
-                    // D-23: False positive filter
-                    if is_false_positive(value) {
-                        break;
-                    }
-
-                    // Entropy check: reject low-entropy values (repeated chars, simple sequences)
-                    let entropy = shannon_entropy(value);
-                    if entropy < ENTROPY_THRESHOLD_PASSWORD {
-                        break;
-                    }
-
-                    let redacted_kw = &line[kw_pos..kw_pos + keyword.len()];
-                    findings.push(ContentFinding {
-                        secret_type: ContentSecretType::PasswordPattern,
-                        confidence: Confidence::ContextDependent,
-                        context: LineContext::Code,
-                        line_number,
-                        redacted_preview: format!("{redacted_kw} {op} ****"),
-                        description: "Password or secret value assigned in plain text",
-                    });
-                    return;
                 }
+                None => words.push(lower),
             }
         }
     }
+    words
+}
+
+/// What the key `ident` (the identifier holding `keyword`) says, or None
+/// when one of its other words marks it as describing a password field
+/// rather than holding a password.
+fn key_name(ident: &str, keyword: &str) -> Option<KeyName> {
+    let words = key_words(ident, keyword);
+    if words.iter().any(|w| UI_KEY_WORDS.contains(&w.as_str())) {
+        return None;
+    }
+    let bare = BARE_PASSWORD_NAMES.contains(&keyword)
+        && match words.as_slice() {
+            [] => true,
+            [one] => BARE_KEY_PREFIXES.contains(&one.as_str()),
+            _ => false,
+        };
+    Some(KeyName {
+        password: password_keyword(keyword),
+        bare,
+    })
+}
+
+/// The literal value assigned to the password keyword at `kw_pos`, and the
+/// assignment operator, or None when the keyword is not assigned a literal.
+fn password_value<'a>(
+    line: &'a str,
+    kw_pos: usize,
+    keyword: &str,
+) -> Option<(&'a str, &'static str)> {
+    // The keyword must not continue a lowercase word: "bypass" and
+    // "compass" do not count. A camelCase part ("dbPass"), a separated
+    // name ("db_pass") and a SCREAMING_CASE run-on ("PGPASSWORD",
+    // "DBPASSWORD") do.
+    if let Some(before) = line[..kw_pos].chars().next_back() {
+        let kw_lower = line[kw_pos..].starts_with(|c: char| c.is_ascii_lowercase());
+        if before.is_ascii_lowercase() && kw_lower {
+            return None;
+        }
+    }
+    // Look for assignment after the keyword. A JSON or YAML key closes its
+    // quote first: `"password": "…"`, `'db_pass': …`.
+    let after_kw = &line[kw_pos + keyword.len()..];
+    let after_kw = match after_kw.strip_prefix(['"', '\'']) {
+        Some(rest) if line[..kw_pos].contains(['"', '\'']) => rest,
+        _ => after_kw,
+    };
+    let trimmed = after_kw.trim_start();
+    let op = ASSIGNMENT_OPS.iter().find(|op| trimmed.starts_with(**op))?;
+    // The identifier holding the keyword (`db_password`, `user.passwordLabel`,
+    // `$pwd`); its last dotted segment decides what the key describes.
+    let name_start = line[..kw_pos]
+        .char_indices()
+        .rev()
+        .find(|(_, c)| !(c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '$')))
+        .map_or(0, |(i, c)| i + c.len_utf8());
+    let kw_end = kw_pos + keyword.len();
+    let name_end = kw_end
+        + line[kw_end..]
+            .find(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '$')))
+            .unwrap_or(line.len() - kw_end);
+    let ident = line[name_start..name_end].rsplit('.').next().unwrap_or("");
+    let name = key_name(ident, keyword)?;
+    let value = assigned_value(&trimmed[op.len()..], name)?;
+    // `process.env.ADMIN_TOKEN = previous`, `flow.auditToken = token(1)`:
+    // a member assigned an unquoted name or call is code.
+    let vs = offset_in(line, value);
+    let quoted = line[..vs].ends_with(['"', '\'', '`']);
+    if !quoted
+        && line[name_start..kw_pos].contains('.')
+        && value.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
+        && value
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '(' | ')' | '[' | ']'))
+    {
+        return None;
+    }
+    // `token: token`, `secret: client_secret`: the variable named after the
+    // keyword. (`password: newPassword` is camelCase code, rejected by
+    // `assigned_value`.) A value that merely contains the word stays a
+    // candidate: `SuperSecretPassword2024`, `my-secret-value-Q9`.
+    let name = value.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '_');
+    let name_lower = name.to_ascii_lowercase();
+    // Also a name: a last segment that is the keyword (`'refresh-token'`,
+    // `'aal2-token'`).
+    let last_segment = name_lower.ends_with(keyword)
+        && name_lower[..name_lower.len() - keyword.len()].ends_with(['-', '_']);
+    if name_lower == *keyword
+        || last_segment
+        || (name_lower.ends_with(keyword)
+            && name
+                .chars()
+                .all(|c| c.is_ascii_alphabetic() || c == '_' || c == '-'))
+    {
+        return None;
+    }
+    // Fixture and documentation values say what they are.
+    if PLACEHOLDER_WORDS.iter().any(|w| name_lower.contains(w)) {
+        return None;
+    }
+    if value.len() < 4 {
+        return None;
+    }
+    // Check it's not a placeholder
+    if PLACEHOLDER_VALUES
+        .iter()
+        .any(|p| value.starts_with(p) || value == *p)
+    {
+        return None;
+    }
+    // D-23: False positive filter
+    if is_false_positive(value) {
+        return None;
+    }
+    // Entropy check: reject low-entropy values (repeated chars, simple sequences)
+    if shannon_entropy(value) < ENTROPY_THRESHOLD_PASSWORD {
+        return None;
+    }
+    Some((value, op))
+}
+
+/// "accessToken" -> ["access", "Token"]; "Uint8Array" -> ["Uint8", "Array"];
+/// "PQSecretBuffer" -> ["PQ", "Secret", "Buffer"] (a run of capitals is an
+/// acronym up to the capital that starts the next word).
+fn split_capitals(s: &str) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let mut start = 0;
+    let chars: Vec<(usize, char)> = s.char_indices().collect();
+    for (n, &(i, c)) in chars.iter().enumerate() {
+        if i == start || !c.is_ascii_uppercase() {
+            continue;
+        }
+        let prev_upper = chars[n - 1].1.is_ascii_uppercase();
+        let next_lower = chars
+            .get(n + 1)
+            .is_some_and(|(_, d)| d.is_ascii_lowercase());
+        if !prev_upper || next_lower {
+            parts.push(&s[start..i]);
+            start = i;
+        }
+    }
+    if start < s.len() {
+        parts.push(&s[start..]);
+    }
+    parts
+}
+
+/// A camelCase part that reads as a word: two or more lowercase letters and
+/// fewer than four digits ("Uint8", "Array", "Int32" are words; the "kX9"
+/// fragments of a random password and "Password2024" are not), or an
+/// acronym of two or more capitals ("PQ", "URL").
+fn word_like(part: &str) -> bool {
+    let lower = part.chars().filter(|c| c.is_ascii_lowercase()).count();
+    let digits = part.chars().filter(|c| c.is_ascii_digit()).count();
+    (lower >= 2 && digits < 4) || (part.len() >= 2 && part.chars().all(|c| c.is_ascii_uppercase()))
+}
+
+/// A quoted value that is one capitalised word of letters only
+/// ("Password", "Contraseña", "Şifre"): a label, not a password. A
+/// lowercase word stays a candidate.
+fn capitalised_word(value: &str) -> bool {
+    let mut chars = value.chars();
+    chars.next().is_some_and(char::is_uppercase)
+        && chars.clone().next().is_some()
+        && chars.all(|c| c.is_alphabetic() && c.is_lowercase())
+}
+
+/// A quoted value that is CamelCase words or a dotted type path, letters
+/// only ("LookupValue", "fooBar", "SomeType.Member"): a name, not a password.
+fn quoted_type_name(value: &str) -> bool {
+    value.chars().all(|c| c.is_ascii_alphabetic() || c == '.')
+        && !value.starts_with('.')
+        && !value.ends_with('.')
+        && !value.contains("..")
+        && camel_words(value)
+}
+
+/// A relative or absolute path: two or more `/`, every segment lowercase
+/// letters, digits, `.`, `_` and `-` ("modules/credential/2025/file-name").
+fn path_value(value: &str) -> bool {
+    value.matches('/').count() >= 2
+        && value.chars().any(|c| c.is_ascii_alphabetic())
+        && value.chars().all(|c| {
+            c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '.' | '_' | '-' | '/')
+        })
+        && value
+            .split('/')
+            .enumerate()
+            .all(|(i, seg)| !seg.is_empty() || i == 0)
+}
+
+/// camelCase or a type like Uint8Array: split at `_`, `.` and each capital,
+/// two or more parts, every part a word.
+fn camel_words(value: &str) -> bool {
+    let parts: Vec<&str> = value.split(['_', '.']).flat_map(split_capitals).collect();
+    parts.len() >= 2 && parts.iter().all(|p| word_like(p))
+}
+
+/// Whether the bracket or pipe at `at` in an unquoted value makes it code:
+/// what precedes it reads as a name (lowercase, snake_case or dotted, or
+/// word-like CamelCase such as a type): `items[i].auth`, `parser.expect(`,
+/// `Coin<SUI>`, `Optional[str]`, `a||b`. A value that starts with one is
+/// code too. `Summer(2024)` (one capitalised word and digits in brackets)
+/// stays a possible password, as does `Zk8#q(…`.
+fn bracket_is_code(value: &str, at: usize) -> bool {
+    // `format!(`, `opt?(`: a macro or optional call keeps its name.
+    let name = value[..at].trim_end_matches(['!', '?']);
+    if name.is_empty() {
+        return true;
+    }
+    // A call or index with a name inside (`MakeThing(arg)`,
+    // `Coerce(*items[key])`) is code whatever the name looks like; a
+    // password with brackets holds digits or symbols there (`Summer(2024)`).
+    let inner = &value[at + 1..];
+    if value[at..].starts_with(['(', '[', '<'])
+        && name.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
+        && inner
+            .trim_start_matches(['*', '&'])
+            .starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
+    {
+        return true;
+    }
+    if !name.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
+        || !name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.'))
+    {
+        return false;
+    }
+    // `summer(2024)!`: one lowercase word, then a year alone in the
+    // brackets, or digits and a closing mark, is a password like
+    // `Summer(2024)`; a call such as `range(10)` or `token(23456)` is not.
+    if value[at..].starts_with('(') && name.chars().all(|c| c.is_ascii_lowercase()) {
+        let tail = &value[at + 1..];
+        let marked = tail.ends_with(['!', '?', '#', '*', '$', '%', '&']);
+        let inner = tail
+            .trim_end_matches(['!', '?', '#', '*', '$', '%', '&'])
+            .trim_end_matches(')');
+        if inner.chars().all(|c| c.is_ascii_digit())
+            && (inner.len() == 4 || (marked && inner.len() >= 2))
+        {
+            return false;
+        }
+    }
+    if name.starts_with(|c: char| c.is_ascii_lowercase() || c == '_') || name.contains(['_', '.']) {
+        return true;
+    }
+    let parts = split_capitals(name);
+    if !parts.iter().all(|p| word_like(p)) {
+        return false;
+    }
+    // `Summer(2024)`: one word, then only digits inside the brackets.
+    if parts.len() == 1 && value[at..].starts_with('(') {
+        let inner = value[at + 1..]
+            .trim_end_matches(['!', '?'])
+            .trim_end_matches(')');
+        if !inner.is_empty() && inner.chars().all(|c| c.is_ascii_digit()) {
+            return false;
+        }
+    }
+    true
+}
+
+/// Words that mark a quoted multi-word value as interface text ("Must be at
+/// least 8 characters"), not a pass phrase.
+const UI_TEXT_WORDS: &[&str] = &[
+    "must",
+    "least",
+    "enter",
+    "please",
+    "character",
+    "required",
+    "invalid",
+    "should",
+    "match",
+    "confirm",
+    "forgot",
+    "reset",
+    "incorrect",
+    "wrong",
+    "your",
+    "cannot",
+];
+
+/// A quoted value with spaces is a pass phrase when it is short (eight words
+/// or fewer), carries a digit or a symbol beyond sentence punctuation, and
+/// does not read as interface text. "This is my pass phrase 2024" is one;
+/// "Enter your password" and "Must be at least 8 characters" are not.
+fn quoted_phrase(value: &str) -> bool {
+    let words: Vec<&str> = value.split_whitespace().collect();
+    if words.is_empty() || words.len() > 8 {
+        return false;
+    }
+    let marked = value.chars().any(|c| {
+        !(c.is_alphabetic() || c.is_whitespace() || matches!(c, '.' | ',' | '\'' | '!' | '?' | ':'))
+    });
+    let ui = words.iter().any(|w| {
+        let w = w
+            .trim_matches(|c: char| !c.is_ascii_alphanumeric())
+            .to_ascii_lowercase();
+        UI_TEXT_WORDS.iter().any(|u| w.starts_with(u))
+    });
+    marked && !ui
+}
+
+/// A quoted value that refers to a secret held elsewhere rather than being
+/// one: shell and template interpolation (`${VAR}`, `$(cmd)`, `$VAR`,
+/// `{{ var }}`), printf-style names (`%(name)s`) and `%VAR%`.
+fn quoted_reference(value: &str) -> bool {
+    value.starts_with("${")
+        || value.starts_with("$(")
+        || value.starts_with("{{")
+        || value.starts_with("%(")
+        || (value.starts_with('$')
+            && value[1..].starts_with(|c: char| c.is_ascii_alphabetic() || c == '_'))
+        || (value.len() > 2
+            && value.starts_with('%')
+            && value.ends_with('%')
+            && value[1..value.len() - 1]
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_'))
+}
+
+/// A quoted value of four to eight plain words, none of them interface
+/// text: `'correct horse battery staple'`. Assigned to a password name it
+/// is a pass phrase even without digits or symbols.
+fn word_passphrase(value: &str) -> bool {
+    let words: Vec<&str> = value.split_whitespace().collect();
+    (4..=8).contains(&words.len())
+        && words
+            .iter()
+            .all(|w| w.chars().all(|c| c.is_ascii_alphabetic()))
+        && !words.iter().any(|w| {
+            let w = w.to_ascii_lowercase();
+            UI_TEXT_WORDS.iter().any(|u| w.starts_with(u))
+        })
 }
 
 /// The one value a `password: …` style line assigns, or None when what
 /// follows is prose, code or a reference rather than a literal secret:
 /// "PASS: tracking quality 0.93", `token = parser.expect("token:")`,
-/// `pass: ${DB_PASS}`, `token: event_kind`.
-fn assigned_value(after_op: &str) -> Option<&str> {
+/// `pass: ${DB_PASS}`, `token: event_kind`. `name.password` says the name
+/// is a password or secret word (not a token or key): such a name makes a
+/// few code-like shapes a password after all (`!MintyRidge42`,
+/// `AutumnRiver42`); `name.bare` says it is a bare password name, which
+/// alone may take a pass phrase (`'correct horse battery staple'`).
+fn assigned_value(after_op: &str, name: KeyName) -> Option<&str> {
+    let password_name = name.password;
+    // `Token::Kind`: a scoped name, not an assignment.
+    if after_op.starts_with(':') {
+        return None;
+    }
     let raw = after_op.trim_start();
     let first = raw.chars().next()?;
-    let (value, rest, quoted) = if first == '"' || first == '\'' {
+    let (value, rest, quote) = if first == '"' || first == '\'' || first == '`' {
         let inner = &raw[1..];
         let end = inner.find(first)?;
-        (&inner[..end], &inner[end + 1..], true)
+        (&inner[..end], &inner[end + 1..], Some(first))
     } else {
         let end = raw
             .find(|c: char| c.is_whitespace() || matches!(c, ',' | ';' | '}' | ']'))
             .unwrap_or(raw.len());
-        (&raw[..end], &raw[end..], false)
+        // An escaped newline or tab: a config written inside a string
+        // literal of code (`"key = value\nnext = …"`), as below.
+        if ["\\n", "\\r", "\\t"].iter().any(|e| raw[..end].contains(e)) {
+            return None;
+        }
+        let mut value = &raw[..end];
+        // The closing quote of an enclosing string (`["DB_PASSWORD=x9Q"]`)
+        // is not part of the value.
+        if let Some(q) = value
+            .strip_suffix(['"', '\'', '`'])
+            .filter(|v| !v.contains(['"', '`']))
+        {
+            value = q;
+        }
+        (value, &raw[end..], None)
     };
-    let value = value.trim();
-    // An unquoted value followed by more words is a sentence.
-    if !quoted
-        && rest
+    let quoted = quote.is_some();
+    let value = value.trim().trim_end_matches(';');
+    // `token: 'string' | number`: a TypeScript type, not a value. A quoted
+    // value with digits or symbols before the `|` is still a password
+    // (`password: 'Tr0ub4dor&3' | number`).
+    if quoted
+        && rest.trim_start().starts_with('|')
+        && value
+            .chars()
+            .all(|c| c.is_ascii_alphabetic() || matches!(c, '_' | '-' | '.' | ' '))
+    {
+        return None;
+    }
+    if !quoted {
+        // An unquoted value followed by more words is a sentence.
+        if rest
             .trim_start()
             .chars()
             .next()
             .is_some_and(|c| c.is_alphanumeric())
-    {
-        return None;
+        {
+            return None;
+        }
+        // One plain word starting a comma-separated list of words is prose
+        // ("Never the secret: fingerprint, identity, reach").
+        if value.chars().all(|c| c.is_ascii_lowercase())
+            && rest.strip_prefix(',').is_some_and(|r| {
+                r.starts_with(' ') && r.trim_start().starts_with(|c: char| c.is_alphabetic())
+            })
+        {
+            return None;
+        }
+        // `!flag`, `?x`, `a?.b`, `a!.b`: negation and optional chaining.
+        // Assigned to a password name, a leading `!` or `?` with digits
+        // after it starts a password (`DB_PASSWORD=!MintyRidge42`).
+        let leading_mark = value.starts_with(['!', '?'])
+            && !(password_name && value[1..].chars().any(|c| c.is_ascii_digit()));
+        if leading_mark || value.contains("?.") || value.contains("!.") {
+            return None;
+        }
+        // Inside a string literal of code: `"…_authToken=x\").unwrap();`,
+        // `format!("{}{}", …)`, `\"123456:ABC\"`, `"API_KEY=\nURL=\n"`.
+        if value.starts_with('\\') || value.contains(['"', '`']) {
+            return None;
+        }
+        // A regex literal: `const TOKEN = /^[0-9a-f]{64}$/;`
+        if value.starts_with('/')
+            && value[1..].contains(['^', '$', '[', ']', '\\', '(', ')', '{', '}', '*', '+'])
+        {
+            return None;
+        }
+        // A decimal or scientific number (`drift_before_pass: 1.5e-05`)
+        // is a measurement. A run of digits alone may still be a PIN.
+        if value.contains(['.', 'e', 'E'])
+            && value.starts_with(|c: char| c.is_ascii_digit() || c == '-')
+            && value.parse::<f64>().is_ok()
+        {
+            return None;
+        }
     }
+    // A trailing `!` or `?` on an unquoted name is TypeScript's non-null or
+    // optional mark (`SessionTokenPayload!`); on anything else it is part of
+    // the password (`Summer2024!`).
+    let core = if quoted {
+        value
+    } else {
+        value.trim_end_matches(['!', '?'])
+    };
+    // Unquoted, a name that reads as code is code: camelCase, a member
+    // (a.b), snake_case, or a type. A plain word stays a possible password.
+    if core.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
+        && core
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.'))
+    {
+        // camelCase or a type like Uint8Array: split at each capital, every
+        // part reads as a word (2+ lowercase letters). A random password
+        // (kX9mP2nQ7) breaks into one-letter fragments instead.
+        // Assigned to a password name, a camel-looking value with digits
+        // is a password (`DB_PASSWORD=AutumnRiver42`, `MyP4ssW0rd`) unless
+        // a part before the last ends in digits, which names a sized type
+        // (`ownerSecret: Uint8Array`).
+        let sized_type = {
+            let parts = split_capitals(core);
+            parts.len() > 1
+                && parts[..parts.len() - 1]
+                    .iter()
+                    .any(|p| p.ends_with(|c: char| c.is_ascii_digit()))
+        };
+        let camel = !quoted
+            && camel_words(core)
+            && !(password_name
+                && core.chars().any(|c| c.is_ascii_digit())
+                && !sized_type
+                && !core.contains('.'));
+        let all_alpha = core
+            .chars()
+            .all(|c| c.is_ascii_alphabetic() || matches!(c, '_' | '.'));
+        let typed = matches!(
+            core.to_ascii_lowercase().as_str(),
+            "string"
+                | "str"
+                | "number"
+                | "int"
+                | "bool"
+                | "boolean"
+                | "true"
+                | "false"
+                | "null"
+                | "nil"
+                | "none"
+                | "undefined"
+                | "any"
+                | "object"
+                | "self"
+                | "this"
+                | "bytes"
+                | "address"
+                | "required"
+                | "optional"
+        );
+        let named = !quoted && all_alpha && core.contains(['_', '.']);
+        let member = !quoted && core.contains('.');
+        if camel || typed || named || member {
+            return None;
+        }
+    }
+    // Brackets and pipes are code only after a name (see bracket_is_code).
+    if !quoted {
+        if let Some(at) = value.find(['(', '[', '<', ')', ']', '>', '|']) {
+            if bracket_is_code(value, at) {
+                return None;
+            }
+        }
+    }
+    // Words with spaces are a pass phrase only under a bare password name
+    // (`password`, `DB_PASSWORD`, `new_pass`); under `token`, `api_key`
+    // or a key with more words (`viewPassword`) they are text.
     if value.chars().any(char::is_whitespace)
-        || value.contains(['(', ')'])
-        || value.contains("::")
-        || value.starts_with(['$', '{', '[', '<', '%', '@', '&', '*'])
+        && !(quoted && name.bare && (quoted_phrase(value) || word_passphrase(value)))
     {
         return None;
     }
-    // A plain snake_case or kebab-case name is an identifier.
+    if value.contains("${") || value.contains("::") {
+        return None;
+    }
+    // `obj->field`: a pointer member access (C, C++, PHP).
+    if !quoted && value.contains("->") {
+        return None;
+    }
+    if quoted {
+        if quoted_reference(value) {
+            return None;
+        }
+        // A label ("Password", "Contraseña"), a type or member name
+        // ("LookupValue", "SomeType.Member"), or an excerpt cut short
+        // ("abC1Def...") is not a password.
+        if capitalised_word(value)
+            || quoted_type_name(value)
+            || value.ends_with("...")
+            || value.ends_with('…')
+        {
+            return None;
+        }
+    } else if value.starts_with(['=', '>', '&', '.', '$', '{', '[', '<', '%', '@', '*']) {
+        return None;
+    }
+    // `modules/credential/2025/file-name`, `/etc/keys/app.pem`: a path.
+    if path_value(value) {
+        return None;
+    }
+    // A plain snake_case or kebab-case name is an identifier, unquoted or in
+    // backticks (code in prose). In quotes it may be a pass phrase, which
+    // has four or more words ("correct-horse-battery-staple"); a shorter one
+    // ("my-service-name", 'some_constant_name') is a name.
     if value
         .chars()
         .all(|c| c.is_ascii_lowercase() || c == '_' || c == '-' || c == '.')
         && value.contains(['_', '-', '.'])
     {
-        return None;
+        let words = value
+            .split(['_', '-', '.'])
+            .filter(|w| w.len() >= 3)
+            .count();
+        if quote.is_none_or(|q| q == '`') || words < 4 {
+            return None;
+        }
     }
     Some(value)
 }
@@ -1895,7 +2887,7 @@ fn check_seed_phrase(lines: &[&str], findings: &mut Vec<ContentFinding>) {
             run_len += 1;
         } else {
             if run_len >= 12 {
-                emit_seed_finding(&all_words, run_start, run_len, findings);
+                emit_valid_seed(&all_words, run_start, run_len, findings);
             }
             run_len = 0;
         }
@@ -1903,7 +2895,47 @@ fn check_seed_phrase(lines: &[&str], findings: &mut Vec<ContentFinding>) {
 
     // Check trailing run
     if run_len >= 12 {
-        emit_seed_finding(&all_words, run_start, run_len, findings);
+        emit_valid_seed(&all_words, run_start, run_len, findings);
+    }
+}
+
+/// How many list words a run may hold beyond a phrase length and still have
+/// every window offset tried (`seed <12 words> key`, `my seed <12 words>
+/// keep it safe`). A longer run (a word list, a dictionary) is tried at its
+/// start and end only: a 12-word checksum is 4 bits, so trying every window
+/// of a long run of list words would find one by chance.
+const SEED_WINDOW_SLACK: usize = 6;
+
+/// A run of list words is a seed phrase only if a phrase-length stretch of
+/// it carries a valid BIP-39 checksum: at any offset when the run is at
+/// most `SEED_WINDOW_SLACK` words longer than the phrase, else at its start
+/// or its end.
+fn emit_valid_seed(
+    all_words: &[(usize, &str)],
+    run_start: usize,
+    run_len: usize,
+    findings: &mut Vec<ContentFinding>,
+) {
+    for size in [24, 21, 18, 15, 12] {
+        if size > run_len {
+            continue;
+        }
+        let last = run_start + run_len - size;
+        let starts: Vec<usize> = if run_len - size <= SEED_WINDOW_SLACK {
+            (run_start..=last).collect()
+        } else {
+            vec![run_start, last]
+        };
+        for start in starts {
+            let words: Vec<&str> = all_words[start..start + size]
+                .iter()
+                .map(|(_, w)| *w)
+                .collect();
+            if bip39_checksum_ok(&words) {
+                emit_seed_finding(all_words, start, size, findings);
+                return;
+            }
+        }
     }
 }
 
@@ -2135,7 +3167,7 @@ const FALSE_POSITIVE_WORDS: &[&str] = &[
 
 /// Check if a token is a known false positive.
 fn is_false_positive(token: &str) -> bool {
-    let lower = token.to_lowercase();
+    let lower = token.to_ascii_lowercase();
     // Check exact matches and prefix matches
     for &fp in FALSE_POSITIVE_WORDS {
         if lower == fp || lower.starts_with(fp) && lower.len() < fp.len() + 8 {
@@ -2154,40 +3186,187 @@ fn is_false_positive(token: &str) -> bool {
 
 // ─── D-24: URI-Embedded Credential Detection ────────────────────────────────
 
+/// Whether `host` is `domain` or a dot-delimited subdomain of it
+/// (`example.com`, `db.example.com`; not `notexample.com`).
+fn host_is_or_under(host: &str, domain: &str) -> bool {
+    host == domain
+        || host
+            .strip_suffix(domain)
+            .is_some_and(|rest| rest.ends_with('.'))
+}
+
+/// A password that stands for one (`password`, `$PASS`, `<pw>`, `%s`).
+fn placeholder_password(password: &str) -> bool {
+    let lowered = password.to_ascii_lowercase();
+    PLACEHOLDER_VALUES.iter().any(|p| password.starts_with(p))
+        || matches!(
+            lowered.as_str(),
+            "pass" | "password" | "passwd" | "secret" | "pwd" | "token" | "test"
+        )
+        || password.starts_with(['$', '*', '<', '[', '{'])
+        // `%VAR%` or `%s` is a placeholder; `%40…` is a URL-escaped
+        // character starting a real password.
+        || (password.starts_with('%') && !starts_with_url_escape(password))
+        || password.chars().all(|c| c == '*' || c == 'x' || c == 'X')
+}
+
 /// Detect credentials embedded in URIs: https://user:password@host
-fn check_uri_credentials(line: &str, line_number: usize, findings: &mut Vec<ContentFinding>) {
+fn check_uri_credentials(
+    line: &str,
+    line_number: usize,
+    findings: &mut Vec<ContentFinding>,
+    cover: &mut Cover,
+) {
     // Look for ://user:pass@host patterns in any scheme
     let schemes = [
         "http://", "https://", "ftp://", "ftps://", "ssh://", "svn://", "git://", "ldap://",
         "ldaps://", "smb://",
     ];
-    let lower = line.to_lowercase();
+    let lower = line.to_ascii_lowercase();
     for scheme in &schemes {
-        if let Some(pos) = lower.find(scheme) {
+        // Every occurrence: a plain link first on the line does not hide a
+        // URL with credentials after it.
+        for (pos, _) in lower.match_indices(scheme) {
+            // `https://` also contains no other scheme, but `ftps://` and
+            // `ftp://` style overlaps, or a URL already reported, are skipped.
+            if overlaps(cover, pos, pos + 1) {
+                continue;
+            }
             let after_scheme = &line[pos + scheme.len()..];
             // Look for user:pass@host pattern
-            if let Some(at_pos) = after_scheme.find('@') {
-                let userinfo = &after_scheme[..at_pos];
-                if let Some(colon_pos) = userinfo.find(':') {
-                    let password = &userinfo[colon_pos + 1..];
-                    // Must have a non-empty password that isn't a placeholder
-                    if password.len() >= 4
-                        && !PLACEHOLDER_VALUES.iter().any(|p| password.starts_with(p))
-                    {
-                        findings.push(ContentFinding {
-                            secret_type: ContentSecretType::DbConnectionString,
-                            confidence: Confidence::High,
-                            context: LineContext::Code,
-                            line_number,
-                            redacted_preview: format!("{scheme}****:****@****"),
-                            description: "URI with embedded credentials (user:password@host)",
-                        });
-                        return;
-                    }
-                }
+            let Some(at_pos) = after_scheme.find('@') else {
+                continue;
+            };
+            let userinfo = &after_scheme[..at_pos];
+            // user:password sits right after the scheme: no path, no
+            // spaces or quotes between (minified code has '@' far later).
+            if userinfo.len() > 256
+                || userinfo.contains(|c: char| {
+                    c.is_whitespace()
+                        || matches!(
+                            c,
+                            '/' | '"' | '\'' | '`' | '<' | '>' | '?' | '#' | '{' | '}'
+                        )
+                })
+            {
+                continue;
             }
+            let host: String = after_scheme[at_pos + 1..]
+                .chars()
+                .take_while(|c| {
+                    c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '[' | ']' | ':')
+                })
+                .collect::<String>()
+                .to_ascii_lowercase();
+            let host_len = host.len();
+            let host_name = host.split(':').next().unwrap_or("");
+            // Documentation hosts and stand-in names: the credentials are
+            // examples.
+            let example = host_name.is_empty()
+                || matches!(host_name, "[" | "host" | "hostname")
+                || ["example.com", "example.org", "example.net"]
+                    .iter()
+                    .any(|d| host_is_or_under(host_name, d))
+                || host_name.ends_with(".example")
+                || host_name.ends_with(".test")
+                || host_name.ends_with(".invalid");
+            // Local and internal hosts: real credentials, but for a service
+            // only this machine or network reaches. Reported at lower
+            // confidence, never dropped.
+            let local = matches!(host_name, "localhost" | "127.0.0.1" | "0.0.0.0" | "[::1]")
+                || host_name.starts_with("127.")
+                || host_name.ends_with(".local")
+                || host_name.ends_with(".localhost")
+                || host_name.ends_with(".internal")
+                || host_name.ends_with(".lan")
+                || host_name.ends_with(".home.arpa");
+            let Some(colon_pos) = userinfo.find(':') else {
+                continue;
+            };
+            let password = &userinfo[colon_pos + 1..];
+            // Must have a non-empty password that isn't a placeholder
+            if password.len() < 4 || placeholder_password(password) || example {
+                continue;
+            }
+            cover.push((pos, pos + scheme.len() + at_pos + 1 + host_len));
+            findings.push(ContentFinding {
+                secret_type: ContentSecretType::DbConnectionString,
+                confidence: if local {
+                    Confidence::ContextDependent
+                } else {
+                    Confidence::High
+                },
+                context: LineContext::Code,
+                line_number,
+                redacted_preview: format!("{scheme}****:****@****"),
+                description: "URI with embedded credentials (user:password@host)",
+            });
         }
     }
+}
+
+/// `curl -u user:password` / `--user user:password` / `--user=user:password`.
+/// Gitleaks' `curl-auth-user` covers the same command but its character
+/// classes stop at symbols such as `!` that real passwords hold.
+fn check_curl_user(
+    line: &str,
+    line_number: usize,
+    findings: &mut Vec<ContentFinding>,
+    cover: &mut Cover,
+) {
+    let Some(curl) = line.find("curl ") else {
+        return;
+    };
+    if curl > 0 && line.as_bytes()[curl - 1].is_ascii_alphanumeric() {
+        return;
+    }
+    let cmd = &line[curl..];
+    for flag in [" -u ", " --user ", " --user="] {
+        for (at, _) in cmd.match_indices(flag) {
+            let rest = cmd[at + flag.len()..].trim_start();
+            let (value, quoted) = match rest.chars().next() {
+                Some(q @ ('"' | '\'')) => {
+                    let inner = &rest[1..];
+                    (&inner[..inner.find(q).unwrap_or(inner.len())], true)
+                }
+                _ => (
+                    &rest[..rest.find(char::is_whitespace).unwrap_or(rest.len())],
+                    false,
+                ),
+            };
+            let Some((user, password)) = value.split_once(':') else {
+                continue;
+            };
+            if user.is_empty()
+                || user.starts_with('$')
+                || password.len() < 4
+                || placeholder_password(password)
+                || (!quoted && password.contains(['(', ')', '`']))
+                || shannon_entropy(password) < ENTROPY_THRESHOLD_PASSWORD
+            {
+                continue;
+            }
+            let vs = offset_in(line, value);
+            if overlaps(cover, vs, vs + value.len()) {
+                continue;
+            }
+            cover.push((vs, vs + value.len()));
+            findings.push(ContentFinding {
+                secret_type: ContentSecretType::PasswordPattern,
+                confidence: Confidence::High,
+                context: LineContext::Code,
+                line_number,
+                redacted_preview: "curl -u ****:****".to_string(),
+                description: "Password passed to curl on the command line (-u user:password)",
+            });
+        }
+    }
+}
+
+/// Whether `s` starts with a URL escape: `%` and two hex digits.
+fn starts_with_url_escape(s: &str) -> bool {
+    let b = s.as_bytes();
+    b.len() >= 3 && b[0] == b'%' && b[1].is_ascii_hexdigit() && b[2].is_ascii_hexdigit()
 }
 
 // ─── D-25: Webhook URL Detection ────────────────────────────────────────────
@@ -2206,24 +3385,28 @@ const WEBHOOK_PATTERNS: &[(&str, &str)] = &[
     ("api.telegram.org/bot", "Telegram Bot Token"),
 ];
 
-fn check_webhook_urls(line: &str, line_number: usize, findings: &mut Vec<ContentFinding>) {
-    let lower = line.to_lowercase();
+const WEBHOOK_DESCRIPTION: &str =
+    "Webhook URL — allows posting messages or triggering actions without authentication";
+
+fn check_webhook_urls(
+    line: &str,
+    line_number: usize,
+    findings: &mut Vec<ContentFinding>,
+    cover: &mut Cover,
+) {
+    let lower = line.to_ascii_lowercase();
     for &(pattern, service) in WEBHOOK_PATTERNS {
-        if lower.contains(pattern) {
-            // Extract a redacted preview
-            let preview = if let Some(pos) = lower.find(pattern) {
-                let end = (pos + pattern.len() + 8).min(line.len());
-                format!("{}****", &line[pos..end.min(pos + 20)])
-            } else {
-                format!("{pattern}****")
-            };
+        if let Some(pos) = lower.find(pattern) {
+            // At most 20 bytes, cut on a character boundary.
+            let preview = format!("{}****", safe_prefix(&line[pos..], 20));
+            cover.push((pos, url_token_end(line, pos)));
             findings.push(ContentFinding {
                 secret_type: ContentSecretType::ApiKey { service },
                 confidence: Confidence::Definitive,
                 context: LineContext::Code,
                 line_number,
                 redacted_preview: preview,
-                description: "Webhook URL — allows posting messages or triggering actions without authentication",
+                description: WEBHOOK_DESCRIPTION,
             });
             return;
         }
@@ -2232,9 +3415,21 @@ fn check_webhook_urls(line: &str, line_number: usize, findings: &mut Vec<Content
 
 // ─── D-26: Azure Cloud Patterns ─────────────────────────────────────────────
 
-fn check_azure_patterns(line: &str, line_number: usize, findings: &mut Vec<ContentFinding>) {
+fn check_azure_patterns(
+    line: &str,
+    line_number: usize,
+    findings: &mut Vec<ContentFinding>,
+    cover: &mut Cover,
+) {
     // Azure Storage connection strings
-    if line.contains("DefaultEndpointsProtocol=") && line.contains("AccountKey=") {
+    if let (Some(start), Some(key)) = (
+        line.find("DefaultEndpointsProtocol="),
+        line.find("AccountKey="),
+    ) {
+        let end = line[key..]
+            .find(|c: char| c.is_whitespace() || matches!(c, ';' | '"' | '\'' | '`'))
+            .map_or(line.len(), |e| key + e);
+        cover.push((start.min(key), end));
         findings.push(ContentFinding {
             secret_type: ContentSecretType::ApiKey {
                 service: "Azure Storage",
@@ -2253,6 +3448,8 @@ fn check_azure_patterns(line: &str, line_number: usize, findings: &mut Vec<Conte
         && (line.contains("sv=") || line.contains("&sv="))
         && (line.contains("se=") || line.contains("&se="))
     {
+        let sig = line.find("sig=").unwrap_or(0);
+        cover.push((sig, url_token_end(line, sig)));
         findings.push(ContentFinding {
             secret_type: ContentSecretType::ApiKey {
                 service: "Azure SAS Token",
@@ -2267,7 +3464,7 @@ fn check_azure_patterns(line: &str, line_number: usize, findings: &mut Vec<Conte
     }
 
     // Azure Function keys
-    let lower = line.to_lowercase();
+    let lower = line.to_ascii_lowercase();
     if lower.contains("x-functions-key")
         || lower.contains("code=") && lower.contains(".azurewebsites.net")
     {
@@ -2278,6 +3475,7 @@ fn check_azure_patterns(line: &str, line_number: usize, findings: &mut Vec<Conte
                 .unwrap_or("");
             let value = after.trim().trim_matches('"').trim_matches('\'');
             if value.len() >= 20 && shannon_entropy(value) >= ENTROPY_THRESHOLD_API_KEY {
+                cover.push((0, line.len()));
                 findings.push(ContentFinding {
                     secret_type: ContentSecretType::ApiKey {
                         service: "Azure Function Key",
@@ -2569,14 +3767,47 @@ pub fn decode_utf16(bytes: &[u8]) -> Option<String> {
 
 /// Check if a word is in the BIP-39 wordlist (using 4-char prefix binary search).
 fn is_bip39_word(word: &str) -> bool {
-    let lower = word.to_lowercase();
-    // BIP-39 words are ASCII only, skip non-ASCII
+    bip39_index(word).is_some()
+}
+
+/// The word's position in the BIP-39 list: the full word, or its four-letter
+/// abbreviation (the first four letters identify each word).
+fn bip39_index(word: &str) -> Option<usize> {
+    let lower = word.to_ascii_lowercase();
     if !lower.is_ascii() || lower.len() < 3 {
+        return None;
+    }
+    let key = &lower[..lower.len().min(4)];
+    let i = BIP39_WORDS
+        .binary_search_by(|w| w[..w.len().min(4)].cmp(key))
+        .ok()?;
+    let full = BIP39_WORDS[i];
+    (lower == full || (lower.len() == 4 && full.starts_with(&lower))).then_some(i)
+}
+
+/// True when `words` (12, 15, 18, 21 or 24 of them) carry a valid BIP-39
+/// checksum: the last bits are the start of SHA-256 of the rest. Ordinary
+/// text that happens to use list words passes about 1 time in 16 to 256.
+fn bip39_checksum_ok(words: &[&str]) -> bool {
+    let n = words.len();
+    if !matches!(n, 12 | 15 | 18 | 21 | 24) {
         return false;
     }
-    let prefix_len = lower.len().min(4);
-    let prefix = &lower[..prefix_len];
-    BIP39_PREFIXES.binary_search(&prefix).is_ok()
+    let mut bits: Vec<bool> = Vec::with_capacity(n * 11);
+    for w in words {
+        let Some(i) = bip39_index(w) else {
+            return false;
+        };
+        bits.extend((0..11).rev().map(|b| (i >> b) & 1 == 1));
+    }
+    let checksum_bits = n / 3;
+    let entropy_bits = n * 11 - checksum_bits;
+    let entropy: Vec<u8> = bits[..entropy_bits]
+        .chunks(8)
+        .map(|byte| byte.iter().fold(0u8, |acc, &b| (acc << 1) | b as u8))
+        .collect();
+    let hash = crate::authority::psbt::sha256(&entropy);
+    (0..checksum_bits).all(|k| ((hash[k / 8] >> (7 - k % 8)) & 1 == 1) == bits[entropy_bits + k])
 }
 
 // ─── Tests ───────────────────────────────────────────────────────────────────
@@ -2588,19 +3819,21 @@ mod tests {
     /// Every check `check_line` can run, without the letter-free fast path.
     fn check_line_all_checks(line: &str, n: usize) -> Vec<ContentFinding> {
         let mut f = Vec::new();
-        check_pem_header(line, n, &mut f);
-        check_aws_access_key(line, n, &mut f);
-        check_api_key_prefixes(line, n, &mut f);
-        check_google_service_account(line, n, &mut f);
-        check_webhook_urls(line, n, &mut f);
-        check_azure_patterns(line, n, &mut f);
-        check_jwt_token(line, n, &mut f);
+        let c = &mut Vec::new();
+        check_pem_header(line, n, &mut f, c);
+        check_aws_access_key(line, n, &mut f, c);
+        check_api_key_prefixes(line, n, &mut f, c);
+        check_google_service_account(line, n, &mut f, c);
+        check_webhook_urls(line, n, &mut f, c);
+        check_azure_patterns(line, n, &mut f, c);
+        check_jwt_token(line, n, &mut f, c);
         check_credit_card(line, n, &mut f);
-        check_db_connection_string(line, n, &mut f);
-        check_wif_key(line, n, &mut f);
-        check_eth_hex_key(line, n, &mut f);
-        check_uri_credentials(line, n, &mut f);
-        check_password_pattern(line, n, &mut f);
+        check_db_connection_string(line, n, &mut f, c);
+        check_wif_key(line, n, &mut f, c);
+        check_eth_hex_key(line, n, &mut f, c);
+        check_uri_credentials(line, n, &mut f, c);
+        check_curl_user(line, n, &mut f, c);
+        check_password_pattern(line, n, &mut f, c);
         check_ssn(line, n, &mut f);
         check_iban(line, n, &mut f);
         check_sensitive_markings(line, n, &mut f);
@@ -2840,6 +4073,729 @@ mod tests {
         assert!(has_hex_key(&format!("wallet: {h}")));
     }
 
+    fn has_uri_creds(line: &str) -> bool {
+        check_line(line, 1)
+            .iter()
+            .any(|f| f.description.starts_with("URI with embedded"))
+    }
+
+    #[test]
+    fn code_is_not_a_password() {
+        assert!(!has_password(
+            "let x = Foo.make({ token: token, key: newKey });"
+        ));
+        assert!(!has_password("  apiToken: SessionTokenPayload!"));
+        assert!(!has_password(
+            "const isPasswordValid = hasLength && hasDigits"
+        ));
+        assert!(!has_password("    token: Coin<SUI>,"));
+        assert!(!has_password("  sessionToken: ctx.accessToken,"));
+        assert!(!has_password("bypass: enabled9"));
+        assert!(!has_password("password: string;"));
+        // Still found (synthetic): a literal, a plain word in a config.
+        assert!(has_password("dbPassword = \"Qz7!mK2#pL9v\""));
+        assert!(has_password("password = mysecretvalue"));
+    }
+
+    #[test]
+    fn hashes_and_slots_are_not_wallet_keys() {
+        let h = "9f2c4e1a7b3d8f60c5e2a9b1d4f7c3e8a6b0d2f5c9e1a3b7d4f8c2e6a0b5d9f1";
+        assert!(!has_hex_key(&format!(
+            "bytes32 internal constant ROLE_HASH = 0x{h};"
+        )));
+        assert!(!has_hex_key(&format!(
+            "bytes32 private constant IMPLEMENTATION_SLOT = 0x{h};"
+        )));
+        assert!(!has_hex_key(&format!("const TX_ID = '0x{h}';")));
+        assert!(!has_hex_key(&format!("  expect(x).to.equal('0x{h}')")));
+        assert!(has_hex_key(&format!("DEPLOYER_PRIVATE_KEY=0x{h}")));
+        assert!(has_hex_key(&format!("0x{h}")));
+    }
+
+    #[test]
+    fn local_example_and_minified_uris_are_not_credentials() {
+        // Local hosts: still credentials, at lower confidence (see
+        // `local_uri_credentials_are_found_at_lower_confidence`).
+        let uri_confidence = |line: &str| {
+            check_line(line, 1)
+                .into_iter()
+                .find(|f| f.description.starts_with("URI with embedded"))
+                .map(|f| f.confidence)
+        };
+        assert_eq!(
+            uri_confidence("RPC=http://bitcoin:Rt7pQ2xZ@127.0.0.1:18443/"),
+            Some(Confidence::ContextDependent)
+        );
+        assert_eq!(
+            uri_confidence("url = 'https://admin:Rt7pQ2xZ@localhost:5432/db'"),
+            Some(Confidence::ContextDependent)
+        );
+        assert!(!has_uri_creds(
+            "see https://user:password@db.internal.net/x"
+        ));
+        assert!(!has_uri_creds(
+            "a=\"https://cdn.site.io/x.js\";b.on(c);d=e(\"user@x\")"
+        ));
+        assert!(has_uri_creds(
+            "API_URL=https://app:Rt7pQ2xZ9@db.acme-internal.net:5432/app"
+        ));
+    }
+
+    #[test]
+    fn bip39_checksums_follow_the_published_vectors() {
+        // Public BIP-39 test vectors (Trezor's list), not anyone's wallet.
+        let a = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
+        let z = "zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo wrong";
+        let l = "legal winner thank year wave sausage worth useful legal winner thank yellow";
+        for good in [a, z, l] {
+            assert!(
+                bip39_checksum_ok(&good.split(' ').collect::<Vec<_>>()),
+                "{good}"
+            );
+        }
+        let bad = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon";
+        assert!(!bip39_checksum_ok(&bad.split(' ').collect::<Vec<_>>()));
+        assert_eq!(BIP39_WORDS.len(), 2048);
+        assert_eq!(bip39_index("zoo"), Some(2047));
+        assert_eq!(bip39_index("aban"), Some(0));
+        assert_eq!(bip39_index("socket"), None);
+    }
+
+    #[test]
+    fn list_words_without_a_checksum_are_not_a_seed_phrase() {
+        let prose =
+            vec!["test socket server client value table window answer about water action fruit"];
+        assert!(check_multi_line(&prose)
+            .iter()
+            .all(|f| f.secret_type != ContentSecretType::SeedPhrase));
+        let vector =
+            vec!["legal winner thank year wave sausage worth useful legal winner thank yellow"];
+        assert!(check_multi_line(&vector)
+            .iter()
+            .any(|f| f.secret_type == ContentSecretType::SeedPhrase));
+    }
+
+    #[test]
+    fn typed_and_scoped_code_is_not_a_password() {
+        assert!(!has_password(
+            "enum Kind { AccessToken::Literal : public Base::Node; }"
+        ));
+        assert!(!has_password(
+            "Token::Kind              : public Node::Base;"
+        ));
+        assert!(!has_password(
+            "function f(accessToken: Uint8Array, s: X): Y;"
+        ));
+        assert!(!has_password("  token: 'string' | number;"));
+        assert!(!has_password("  password: 'read-only' | 'admin';"));
+        assert!(has_password("password: 'Tr0ub4dor&3' | number"));
+        assert!(!has_password("  authToken: `${prefix}.${suffix}`,"));
+        assert!(!has_password("  dataToken: dataLayer[\"x\"][\"Token\"];"));
+        assert!(!has_password("  sessionToken: items[i].auth.sessionToken,"));
+        assert!(!has_password(
+            "password: `config_value` is read from the vault"
+        ));
+        // Still found (synthetic).
+        assert!(has_password("API_PASSWORD=Summer2024x"));
+        assert!(has_password(
+            "token='9f2c4e1a7b3d8f60c5e2a9b1d4f7c3e8a6b0d2f5'"
+        ));
+        assert!(has_password("password: `Xk9#mP2vL7q`"));
+    }
+
+    // ── Audit regressions (2026-11-06): false negatives from FP tuning ──
+    // Every value below is synthetic.
+
+    #[test]
+    fn screaming_case_run_on_password_names_are_found() {
+        assert!(has_password("PGPASSWORD=hunter2xyz9Q"));
+        assert!(has_password("MYSQLPASSWORD=Zk8#qL2vR9wP"));
+        assert!(has_password("DBPASSWORD=Zk8#qL2vR9wP"));
+        // Still not: a lowercase word that merely contains the keyword.
+        assert!(!has_password("bypass: enabled9"));
+        assert!(!has_password("compass = north9x"));
+    }
+
+    #[test]
+    fn unquoted_bang_question_and_bracket_values_are_passwords() {
+        assert!(has_password("DB_PASSWORD=Summer2024!"));
+        assert!(has_password("DB_PASSWORD=Summer2024?"));
+        assert!(has_password("DB_PASSWORD=Zk8#qL2vR9wP!"));
+        assert!(has_password("DB_PASSWORD=Summer(2024)"));
+        // Code after a name stays code.
+        assert!(!has_password("  sessionToken: items[i].auth.sessionToken,"));
+        assert!(!has_password("token = parser.expect(\"token:\").strip()"));
+        assert!(!has_password("    token: Coin<SUI>,"));
+        assert!(!has_password("  password: Optional[str]"));
+        assert!(!has_password("  apiToken: SessionTokenPayload!"));
+        assert!(!has_password("  token: user?.session"));
+        // Code inside string literals, regex literals and stand-in values.
+        assert!(!has_password("const TOKEN = /^[0-9a-f]{64}$/;"));
+        assert!(!has_password(
+            "    fs::write(p, \"//registry/:_authToken=x\").unwrap();"
+        ));
+        assert!(!has_password("let aws_secret = format!(\"{}{}\", a, b);"));
+        assert!(!has_password(
+            "STRIPE_SECRET_KEY = 'sk_test_not_a_real_key'"
+        ));
+        assert!(!has_password("  token: 'synthetic-recipient-secret',"));
+        assert!(!has_password("session = { access_token: 'aal2-token' }"));
+        // The closing quote of an enclosing string is not part of the value.
+        assert!(has_password("  \"env\": [\"DB_PASSWORD=Zk8#qL2vR9wP\"],"));
+    }
+
+    #[test]
+    fn value_containing_the_keyword_is_still_a_password() {
+        assert!(has_password("PASSWORD=SuperSecretPassword2024"));
+        assert!(has_password("secret=my-secret-value-Q9"));
+        assert!(has_password("API_TOKEN=abc-token-Q9x7"));
+        // The variable named after the keyword is not.
+        assert!(!has_password("let x = Foo.make({ token: token });"));
+        assert!(!has_password("  password: newPassword,"));
+        assert!(!has_password("  secret: client_secret,"));
+    }
+
+    #[test]
+    fn quoted_phrases_kebab_values_and_punctuation_starts_are_passwords() {
+        assert!(has_password("password = \"This is my pass phrase 2024\""));
+        assert!(has_password(
+            "DB_PASSWORD = \"correct-horse-battery-staple\""
+        ));
+        assert!(has_password("WIFI_PASSWORD = \"!Tr0ub4dor&3xQ\""));
+        // Interpolations and interface text are not.
+        assert!(!has_password("DB_PASSWORD = \"${VAULT_DB_PASSWORD}\""));
+        assert!(!has_password("DB_PASSWORD = \"$(pass show db)\""));
+        assert!(!has_password("password: \"Must be at least 8 characters\""));
+        assert!(!has_password("password: \"Enter your password\""));
+        assert!(!has_password(
+            "password: `config_value` is read from the vault"
+        ));
+    }
+
+    #[test]
+    fn non_ascii_case_mapping_never_shifts_offsets() {
+        // Kelvin sign and Angstrom sign lowercase to ASCII letters of a
+        // different byte length under full Unicode lowercasing; dotted
+        // capital I lowercases to two characters.
+        let lines = [
+            "\u{212A} password = \"Tr0ub4dor&3xQ\"",
+            "\u{0130} password = \"Tr0ub4dor&3xQ\"",
+        ];
+        for l in lines {
+            assert!(has_password(l), "{l:?}");
+        }
+        assert!(has_uri_creds(
+            "\u{212B}\u{e9}https://admin:Rt7pQ2xZ9@db.acme-internal.net/x"
+        ));
+        // Webhook previews cut on a character boundary.
+        let _ = check_line("hooks.slack.com/services/\u{e9}\u{e9}\u{e9}\u{e9}", 1);
+    }
+
+    #[test]
+    fn url_query_separators_end_a_key() {
+        let key = format!("AIza{}", "SyQ7xR2mK9pL4vN8cT3wZ6yB1hD5fJ0gS2u");
+        assert!(has_api_key(&format!(
+            "src=\"https://maps.googleapis.com/maps/api/js?key={key}&callback=initMap\""
+        )));
+        assert!(has_api_key(&format!("https://x.example/?key={key}#top")));
+    }
+
+    #[test]
+    fn hex_key_name_decides_before_hash_words() {
+        let h = "9f2c4e1a7b3d8f60c5e2a9b1d4f7c3e8a6b0d2f5c9e1a3b7d4f8c2e6a0b5d9f1";
+        assert!(has_hex_key(&format!("ROOT_PRIVATE_KEY=0x{h}")));
+        assert!(has_hex_key(&format!("PRIVATE_KEY=0x{h} # do not commit")));
+        assert!(has_hex_key(&format!("ROOT_PRIVATE_KEY={h}")));
+        assert!(!has_hex_key(&format!(
+            "bytes32 internal constant ROLE_HASH = 0x{h};"
+        )));
+        assert!(!has_hex_key(&format!(
+            "bytes32 private constant IMPLEMENTATION_SLOT = 0x{h};"
+        )));
+        assert!(!has_hex_key(&format!("PRIVATE_KEY_HASH=0x{h}")));
+        // Every 0x on the line is examined, not only the first.
+        assert!(has_hex_key(&format!(
+            "deploy(0x0, 1); DEPLOYER_PRIVATE_KEY=0x{h}"
+        )));
+        assert!(has_hex_key(&format!(
+            "ROLE_HASH=0x{h}; PRIVATE_KEY=0x{}",
+            format!("{}7", &h[1..])
+        )));
+    }
+
+    #[test]
+    fn comma_separated_fields_can_hold_a_card() {
+        assert!(has_card("john,4532015112830366,1225,123"));
+        assert!(has_card("4532015112830366,12/25,123"));
+        assert!(!has_card("453.2015112830366"));
+    }
+
+    #[test]
+    fn url_escaped_password_start_is_not_a_placeholder() {
+        assert!(has_uri_creds(
+            "https://user:%40ssw0rdX9@db.acme-internal.net/db"
+        ));
+        assert!(!has_uri_creds(
+            "https://user:%PASSWORD%@db.acme-internal.net/db"
+        ));
+    }
+
+    #[test]
+    fn gitleaks_rules_run_beside_gorse_findings_and_report_a_key_once() {
+        let pk = format!(
+            "{}_{}_{}",
+            "pk", "live", "51N9xR2mK9pL4vN8cT3wZ6yB1hD5fJ0gS"
+        );
+        let h = "9f2c4e1a7b3d8f60c5e2a9b1d4f7c3e8a6b0d2f5c9e1a3b7d4f8c2e6a0b5d9f1";
+        let dop = format!("{}_{}_{h}", "dop", "v1");
+        let line = format!("{{\"stripePublishableKey\":\"{pk}\",\"digitalOceanToken\":\"{dop}\"}}");
+        let f = check_line(&line, 1);
+        assert!(
+            f.iter().any(|x| x.redacted_preview.starts_with("pk_l")),
+            "{f:?}"
+        );
+        assert!(
+            f.iter().any(|x| x.redacted_preview.starts_with("dop_")),
+            "{f:?}"
+        );
+
+        let ghp = format!("{}{}", "ghp_", "Zq3Xr7Lm2Np8Vt4Wy6Bc1Dk5Fh9Gj0Hs2Ju7Ka");
+        let f = check_line(&format!("token={ghp}"), 1);
+        let n = f
+            .iter()
+            .filter(|x| x.redacted_preview.starts_with("ghp_"))
+            .count();
+        assert_eq!(n, 1, "{f:?}");
+        // A webhook Gorse names is not listed again by Gitleaks.
+        let hook = format!(
+            "https://hooks.slack.com/services/T{}/B{}/{}",
+            "Q7XR2MK9P", "L4VN8CT3W", "Zq3Xr7Lm2Np8Vt4Wy6Bc1Dk5"
+        );
+        assert_eq!(check_line(&hook, 1).len(), 1, "{:?}", check_line(&hook, 1));
+        // The generic password rule still stays quiet next to a named key.
+        assert!(f
+            .iter()
+            .all(|x| x.secret_type != ContentSecretType::PasswordPattern));
+    }
+
+    #[test]
+    fn calls_pointer_members_and_short_quoted_names_are_code() {
+        assert!(!has_password(
+            "  BlendState = MakeBlendState(src0_a(BlendState) + 1));"
+        ));
+        assert!(!has_password(
+            "  FToken OutToken = FToken(*TokenMap[TokenIndex]);"
+        ));
+        assert!(!has_password("  session_token = session->token;"));
+        assert!(!has_password("  token_header_name=\"my-service-name\""));
+        assert!(!has_password("  SECRET_TOKEN_NAME = 'some_constant_name'"));
+        // Still found (synthetic).
+        assert!(has_password("DB_PASSWORD=Summer(2024)"));
+        assert!(has_password(
+            "DB_PASSWORD = \"correct-horse-battery-staple\""
+        ));
+    }
+
+    // ── Audit regressions (2026-11-06, third and fourth audits) ──
+    // Every value below is synthetic or a published test vector.
+
+    const HEX64: &str = "9f2c4e1a7b3d8f60c5e2a9b1d4f7c3e8a6b0d2f5c9e1a3b7d4f8c2e6a0b5d9f1";
+
+    #[test]
+    fn eth_keys_in_common_shapes_are_found() {
+        let h = HEX64;
+        for line in [
+            format!("    accounts: [\"0x{h}\"],"),
+            format!("ADMIN_KEY=0x{h}"),
+            format!("OPERATOR_KEY=0x{h}"),
+            format!("KEY=0x{h}"),
+            format!("const key = '0x{h}';"),
+            format!("{{\"key\":\"0x{h}\"}}"),
+            format!("0x{h}  // my main account"),
+            format!("DEPLOYER_PK=0x{h}"),
+            format!("DEPLOYER_PK={h}"),
+            format!("signer: '0x{h}'"),
+        ] {
+            assert!(has_hex_key(&line), "{line}");
+        }
+        for line in [
+            format!("ROLE_HASH=0x{h}"),
+            format!("IMPLEMENTATION_SLOT = 0x{h}"),
+            format!("private_key_sha256 = \"{h}\""),
+            format!("bytes32 private immutable DOMAIN_SEPARATOR = 0x{h};"),
+            format!("\"must_match_key\": \"{h}\","),
+            format!("publicKey: '0x{h}'"),
+            format!("0x{h}  // tx hash"),
+        ] {
+            assert!(!has_hex_key(&line), "{line}");
+        }
+    }
+
+    #[test]
+    fn bare_hex_runs_pass_the_false_positive_filter() {
+        // Both loops apply the same filters, so a value is judged the same
+        // with or without 0x.
+        for v in [HEX64, &"0123456789abcdef".repeat(4), &"ab".repeat(32)] {
+            assert_eq!(
+                has_hex_key(&format!("PRIVATE_KEY=0x{v}")),
+                has_hex_key(&format!("PRIVATE_KEY={v}")),
+                "{v}"
+            );
+        }
+        assert!(!has_hex_key(&format!("PRIVATE_KEY={}", "ab".repeat(32))));
+    }
+
+    #[test]
+    fn seed_phrase_is_found_at_any_offset_of_a_short_run() {
+        // Published BIP-39 test vector between other list words.
+        let v = "legal winner thank year wave sausage worth useful legal winner thank yellow";
+        for text in [
+            format!("seed {v} key"),
+            format!("my seed {v} keep it safe"),
+            format!("wallet seed {v} key word"),
+        ] {
+            assert!(
+                check_multi_line(&[text.as_str()])
+                    .iter()
+                    .any(|f| f.secret_type == ContentSecretType::SeedPhrase),
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn same_service_second_key_on_a_line_is_reported() {
+        let g1 = format!("{}{}", "ghp_", "Zq3Xr7Lm2Np8Vt4Wy6Bc1Dk5Fh9Gj0Hs2Ju7Ka");
+        let g2 = format!("{}{}", "ghp_", "Pm4Kd8Rt2Vx6Bn1Qw9Lz3Hc7Fj5Ys0Ag2Te8Nu");
+        let count = |line: &str, head: &str| {
+            check_line(line, 1)
+                .iter()
+                .filter(|f| f.redacted_preview.starts_with(head))
+                .count()
+        };
+        assert_eq!(
+            count(&format!("{{\"a\":\"{g1}\",\"b\":\"{g2}\"}}"), "ghp_"),
+            2
+        );
+        assert_eq!(count(&format!("token={g1}"), "ghp_"), 1);
+        let n1 = format!("{}{}", "npm_", "Zq3Xr7Lm2Np8Vt4Wy6Bc1Dk5Fh9Gj0Hs2Ju7");
+        let n2 = format!("{}{}", "npm_", "Pm4Kd8Rt2Vx6Bn1Qw9Lz3Hc7Fj5Ys0Ag2Te8");
+        assert_eq!(
+            count(
+                &format!("//registry.npmjs.org/:_authToken={n1} //npm.acme-internal.net/:_authToken={n2}"),
+                "npm_"
+            ),
+            2
+        );
+        let hook = format!(
+            "https://hooks.slack.com/services/T00000000/B00000000/{}",
+            "Zq3Xr7Lm2Np8Vt4Wy6Bc1Dk5"
+        );
+        let line = format!(
+            "{{\"proxy\":\"https://user:Tr0ub4dor3xQ9@proxy.acme-internal.net:8443\",\"slack\":\"{hook}\"}}"
+        );
+        let f = check_line(&line, 1);
+        assert!(
+            f.iter()
+                .any(|x| x.description.starts_with("URI with embedded")),
+            "{f:?}"
+        );
+        assert!(
+            f.iter().any(|x| x.description == WEBHOOK_DESCRIPTION),
+            "{f:?}"
+        );
+        assert_eq!(f.len(), 2, "{f:?}");
+        // A key inside a credential URL is still named by its service.
+        let f = check_line(
+            &format!("git clone https://x-access-token:{g1}@github.com/org/repo.git"),
+            1,
+        );
+        assert!(
+            f.iter().any(|x| x.redacted_preview.starts_with("ghp_")),
+            "{f:?}"
+        );
+        assert!(
+            f.iter()
+                .any(|x| x.description.starts_with("URI with embedded")),
+            "{f:?}"
+        );
+    }
+
+    #[test]
+    fn public_identifier_does_not_hide_a_password() {
+        assert!(has_password(
+            "{\"twilio_sid\":\"AC0123456789abcdef0123456789abcdef\",\"db_password\":\"Tr0ub4dor&3xQ9!\"}"
+        ));
+        let pk = format!(
+            "{}_{}_{}",
+            "pk", "live", "51N9xR2mK9pL4vN8cT3wZ6yB1hD5fJ0gS"
+        );
+        assert!(has_password(&format!(
+            "STRIPE_PK={pk}; DB_PASSWORD=Zk8#qL2vR9wP"
+        )));
+        // The key's own value is still not reported twice.
+        let ghp = format!("{}{}", "ghp_", "Zq3Xr7Lm2Np8Vt4Wy6Bc1Dk5Fh9Gj0Hs2Ju7Ka");
+        assert!(!has_password(&format!("GITHUB_TOKEN={ghp}")));
+    }
+
+    #[test]
+    fn every_keyword_and_scheme_occurrence_is_checked() {
+        assert!(has_password(
+            "{\"auth_mode\": \"pass_through\", \"pass\": \"Tr0ub4dor&3xQ9!\"}"
+        ));
+        assert!(has_password("bypass_check = 1; pass = \"Tr0ub4dor&3xQ9!\""));
+        assert!(has_password("{\"password\": \"Tr0ub4dor&3xQ9!\"}"));
+        assert!(has_uri_creds(
+            "{\"docs\": \"https://acme.dev/docs\", \"feed\": \"https://admin:Tr0ub4dor3xQ9@feed.acme-internal.net/v1\"}"
+        ));
+        let db = |line: &str| {
+            check_line(line, 1)
+                .iter()
+                .any(|f| f.description.starts_with("Database connection string"))
+        };
+        assert!(db(
+            "a=postgres://localhost/app b=postgres://app:Rt7pQ2xZ9@db.acme-internal.net/app"
+        ));
+        assert!(!db("a=postgres://localhost/app contact ops@acme.dev"));
+    }
+
+    #[test]
+    fn short_prefix_key_with_a_random_part_and_separator_is_found() {
+        let line = "DATABRICKS_TOKEN=dapi9f2c4e1a7b3d8f60c5e2a9b1d4f7c3e8-2";
+        let (mut f, mut c) = (Vec::new(), Vec::new());
+        check_api_key_prefixes(line, 1, &mut f, &mut c);
+        assert!(
+            f.iter().any(|x| x.secret_type
+                == ContentSecretType::ApiKey {
+                    service: "Databricks API Token"
+                }),
+            "{f:?}"
+        );
+        // snake_case names with digits stay names.
+        let (mut f, mut c) = (Vec::new(), Vec::new());
+        check_api_key_prefixes(
+            "x = co_occurrence_matrix_2d_cache_final_v2",
+            1,
+            &mut f,
+            &mut c,
+        );
+        assert!(f.is_empty(), "{f:?}");
+    }
+
+    #[test]
+    fn lowercase_word_with_a_year_in_brackets_is_a_password() {
+        assert!(has_password("PASSWORD=summer(2024)!"));
+        assert!(has_password("PASSWORD=Summer(2024)!"));
+        assert!(!has_password("token = range(10)"));
+        assert!(!has_password("flow.sourceProcessAuditToken = token(23456)"));
+        assert!(!has_password("password = hash(value)"));
+    }
+
+    #[test]
+    fn curl_user_password_with_symbols_is_found() {
+        assert!(has_password(
+            "curl -H \"X-Env:test\" https://api.acme-internal.net/v1 -u admin:MyRealProdS9!"
+        ));
+        assert!(has_password(
+            "curl --user=admin:Tr0ub4dor3xQ9 https://192.0.2.10"
+        ));
+        assert!(!has_password("curl -u admin:password https://192.0.2.10"));
+        assert!(!has_password("curl -u \"$USER:$PASS\" https://192.0.2.10"));
+        assert!(!has_password("curl -u admin https://192.0.2.10"));
+    }
+
+    #[test]
+    fn password_names_accept_passphrases_marks_and_digit_camel_values() {
+        assert!(has_password("PASSWORD='correct horse battery staple'"));
+        assert!(has_password("DB_PASSWORD=!MintyRidge42"));
+        assert!(has_password("DB_PASSWORD=?Mige42"));
+        assert!(has_password("DB_PASSWORD=AutumnRiver42"));
+        // Still code: negation, camelCase without digits, token names,
+        // interface text.
+        assert!(!has_password("  password: !isValid,"));
+        assert!(!has_password("  password: newPassword,"));
+        assert!(!has_password("  accessToken: userSession2,"));
+        assert!(!has_password("password: 'please enter it here'"));
+        assert!(!has_password("password = 'see the docs'"));
+        // Code and prose that only reached the check once every keyword
+        // occurrence was examined.
+        assert!(!has_password(
+            "if (p === undefined) delete process.env.ADMIN_TOKEN; else process.env.ADMIN_TOKEN = previous"
+        ));
+        assert!(!has_password(
+            "| Output | The secret, redacted | Never the secret: fingerprint, identity, reach |"
+        ));
+        assert!(!has_password(
+            "\"[foo]\\naws_access_key_id = AKIAFOO\\naws_secret_access_key = other\\n\","
+        ));
+        assert!(has_password("password = mysecretvalue"));
+    }
+
+    #[test]
+    fn key_words_that_describe_a_password_field_are_not_passwords() {
+        // Interface and meta words beside the keyword: the key describes a
+        // password field, it does not hold one.
+        assert!(!has_password("\"resetPassword\": \"Tr0ub4dor&3xQ\""));
+        assert!(!has_password("\"enterPassword\": \"Tr0ub4dor&3xQ\""));
+        assert!(!has_password("\"wrong_password\": \"Tr0ub4dor&3xQ\""));
+        assert!(!has_password("\"label_pass\": \"Tr0ub4dor&3xQ\""));
+        assert!(!has_password("has_password = \"Tr0ub4dor&3xQ\""));
+        assert!(!has_password("\"user_token\": \"q8Fz2LkP0vN7mX4c\""));
+        assert!(!has_password("self.password_hash = \"q8Fz2LkP0vN7mX4c\""));
+        assert!(!has_password("\"viewPassword\": \"Enter it to view 2024\""));
+        // Kept: a bare name, a keep-word prefix, a member, a run-on name
+        // and a word that says nothing about the field.
+        assert!(has_password("\"db_password\": \"Tr0ub4dor&3xQ\""));
+        assert!(has_password("\"adminPassword\": \"Tr0ub4dor&3xQ\""));
+        assert!(has_password("PGPASSWORD=hunter2xyz9Q"));
+        assert!(has_password("user.password = \"Tr0ub4dor&3xQ\""));
+        assert!(has_password("\"wifi_pass\": \"Tr0ub4dor&3xQ\""));
+        assert_eq!(key_words("passwordLabel", "password"), ["label"]);
+        assert_eq!(key_words("DBPASSWORD", "password"), ["db"]);
+        assert_eq!(key_words("api_key", "api_key"), ["api", "key"]);
+        assert!(key_words("$password", "password").is_empty());
+    }
+
+    #[test]
+    fn quoted_labels_type_names_and_paths_are_not_passwords() {
+        // One capitalised word is a label (translation files); a lowercase
+        // word stays a candidate.
+        assert!(!has_password("\"password\": \"Contraseña\""));
+        assert!(!has_password("\"password\": \"Şifre\""));
+        assert!(!has_password("\"password\": \"Password\""));
+        assert!(has_password("\"password\": \"mysecretvalue\""));
+        // CamelCase words and dotted type paths are names.
+        assert!(!has_password(
+            "\"secret_token\": \"SomeTypeName.LookupValue\""
+        ));
+        assert!(!has_password("\"token\": \"ClassName.Value\""));
+        assert!(!has_password("\"pass\": \"CamelCaseWordsWithoutDigits\""));
+        assert!(!has_password("\"token\": \"PQSecretBuffer\""));
+        assert!(!has_password("\"secret\": \"fooBarBaz\""));
+        assert!(has_password("\"pass\": \"CamelCaseWords2024\""));
+        assert!(has_password("\"pass\": \"iLoveMyDog9\""));
+        // Relative and absolute paths.
+        assert!(!has_password(
+            "\"something_private_key\": \"modules/credential/path/20250101/file-name\""
+        ));
+        assert!(!has_password("private_key: /etc/keys/app.pem"));
+        assert!(has_password("\"password\": \"ab/cd9Q!xy\""));
+    }
+
+    #[test]
+    fn sentences_need_a_bare_password_name() {
+        assert!(has_password("password = \"This is my pass phrase 2024\""));
+        assert!(has_password(
+            "DB_PASSWORD = \"This is my pass phrase 2024\""
+        ));
+        assert!(has_password("PASSWORD='correct horse battery staple'"));
+        assert!(has_password("PGPASSWORD='correct horse battery staple'"));
+        assert!(has_password("new_pass: 'correct horse battery staple'"));
+        // Not bare: a describing word, an unknown prefix, a token or key.
+        assert!(!has_password("\"viewPassword\": \"Open the vault 2024\""));
+        assert!(!has_password("\"hint_password\": \"Use the vault 2024\""));
+        assert!(!has_password(
+            "\"wrongPassword\": \"That one is wrong 2024\""
+        ));
+        assert!(!has_password("\"weak_pass\": \"Four plain words here\""));
+        assert!(!has_password("\"token\": \"Some words with 2024\""));
+        assert!(!has_password("\"api_key\": \"Your key words 9\""));
+        assert!(!has_password(
+            "secret_token: 'correct horse battery staple'"
+        ));
+    }
+
+    #[test]
+    fn numbers_sized_types_acronym_names_and_cut_excerpts_are_not_passwords() {
+        assert!(!has_password("\"drift_cm_before_pass\": 1.5e-05,"));
+        assert!(!has_password("\"before_pass\": 0.9312,"));
+        assert!(!has_password("ownerSecret: Uint8Array;"));
+        assert!(!has_password("'pq-secret': PQSecretBuffer,"));
+        assert!(!has_password("\"purchaseToken\": \"abC1DefgH2ijKlm...\""));
+        assert!(!has_password("\"token\": \"abC1DefgH2ijKlm…\""));
+        // Still passwords: digit camel values under a password name, a
+        // bare run of digits.
+        assert!(has_password("DB_PASSWORD=AutumnRiver42"));
+        assert!(has_password("DB_PASSWORD=MyP4ssW0rd"));
+        assert!(has_password("PASSWORD=SuperSecretPassword2024"));
+        assert_eq!(split_capitals("PQSecretBuffer"), ["PQ", "Secret", "Buffer"]);
+        assert_eq!(split_capitals("URLToken"), ["URL", "Token"]);
+        assert_eq!(split_capitals("Uint8Array"), ["Uint8", "Array"]);
+        assert_eq!(split_capitals("kX9mP2nQ7"), ["k", "X9m", "P2n", "Q7"]);
+    }
+
+    #[test]
+    fn uuid_values_are_kept_at_lower_confidence() {
+        let conf = |line: &str| {
+            check_line(line, 1)
+                .into_iter()
+                .find(|f| f.secret_type == ContentSecretType::PasswordPattern)
+                .map(|f| f.confidence)
+        };
+        assert_eq!(
+            conf("\"token\": \"a4b1cd23-1234-4a5b-8c9d-0e1f23456789\""),
+            Some(Confidence::Heuristic)
+        );
+        assert_eq!(
+            conf("\"token\": \"q8Fz2LkP0vN7mX4c\""),
+            Some(Confidence::ContextDependent)
+        );
+    }
+
+    #[test]
+    fn local_uri_credentials_are_found_at_lower_confidence() {
+        let conf = |line: &str| {
+            check_line(line, 1)
+                .into_iter()
+                .find(|f| f.description.starts_with("URI with embedded"))
+                .map(|f| f.confidence)
+        };
+        for local in [
+            "RPC=http://bitcoin:Rt7pQ2xZ@127.0.0.1:18443/",
+            "url = 'https://admin:Rt7pQ2xZ@localhost:5432/db'",
+            "https://u:Tr0ub4dor3xQ9@nas.local/share",
+            "https://u:Tr0ub4dor3xQ9@svc.internal/x",
+        ] {
+            assert_eq!(conf(local), Some(Confidence::ContextDependent), "{local}");
+        }
+        assert_eq!(
+            conf("https://u:Tr0ub4dor3xQ9@db.notexample.com/x"),
+            Some(Confidence::High)
+        );
+        // Example domains, exactly or as a subdomain, and placeholders stay
+        // quiet.
+        assert_eq!(conf("https://u:Tr0ub4dor3xQ9@example.com/x"), None);
+        assert_eq!(conf("https://u:Tr0ub4dor3xQ9@db.example.com/x"), None);
+        assert_eq!(conf("https://admin:password@localhost/x"), None);
+    }
+
+    fn env_password(line: &str) -> bool {
+        check_env_line(line, 1)
+            .iter()
+            .any(|f| f.secret_type == ContentSecretType::PasswordPattern)
+    }
+
+    #[test]
+    fn env_lines_report_literal_values_without_code_shape_rules() {
+        assert!(env_password("DB_PASSWORD=correct_horse_battery_staple"));
+        assert!(env_password("DB_PASSWORD=correct-horse-battery-staple"));
+        assert!(env_password("PASSWORD=mypassword9"));
+        assert!(env_password("export API_TOKEN=\"camelCaseLooking\""));
+        assert!(env_password("SESSION_SECRET='hunterTwo' # local"));
+        assert!(!env_password("DB_PASSWORD=${DB_PASSWORD}"));
+        assert!(!env_password("DB_PASSWORD=$DB_PASSWORD"));
+        assert!(!env_password("PASSWORD=changeme"));
+        assert!(!env_password("DB_PASSWORD="));
+        assert!(!env_password("PRIVATE_KEY_PATH=/etc/keys/app.pem"));
+        assert!(!env_password("TOKENIZER_MODEL=bert-base-uncased"));
+        assert!(!env_password("STRIPE_PUBLISHABLE_KEY=pk_live_abcdefgh"));
+        // Other checks still run, and a value they name is not repeated.
+        let ghp = format!("{}{}", "ghp_", "Zq3Xr7Lm2Np8Vt4Wy6Bc1Dk5Fh9Gj0Hs2Ju7Ka");
+        let f = check_env_line(&format!("GITHUB_TOKEN={ghp}"), 1);
+        assert_eq!(f.len(), 1, "{f:?}");
+        assert!(matches!(f[0].secret_type, ContentSecretType::ApiKey { .. }));
+    }
+
     #[test]
     fn short_key_prefix_with_a_key_shaped_token_is_found() {
         // Synthetic, Resend-shaped.
@@ -2973,9 +4929,8 @@ mod tests {
 
     #[test]
     fn detect_seed_phrase_12_words() {
-        let lines = vec![
-            "abandon ability able about above absent absorb abstract absurd abuse access accident",
-        ];
+        let lines =
+            vec!["legal winner thank year wave sausage worth useful legal winner thank yellow"];
         let findings = check_multi_line(&lines);
         assert!(findings
             .iter()
@@ -3647,7 +5602,7 @@ mod tests {
 
     #[test]
     fn detect_uri_credentials_https() {
-        let findings = check_line("https://admin:s3cretP4ss@db.example.com:5432/mydb", 1);
+        let findings = check_line("https://admin:s3cretP4ss@db.acme-internal.net:5432/mydb", 1);
         assert!(
             findings
                 .iter()

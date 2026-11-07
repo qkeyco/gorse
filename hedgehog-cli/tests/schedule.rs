@@ -30,7 +30,7 @@ impl TestHome {
     }
 
     /// A command with the inherited environment cleared, so the developer's
-    /// own credentials, licence and TruffleHog stay out of the picture.
+    /// own credentials and licence stay out of the picture.
     fn command(&self) -> Command {
         let mut command = Command::new(env!("CARGO_BIN_EXE_gorse"));
         command.env_clear();
@@ -42,7 +42,6 @@ impl TestHome {
             .env("LOCALAPPDATA", self.root.join("home/AppData/Local"))
             .env("XDG_CONFIG_HOME", self.root.join("home/.config"))
             .env("GORSE_STATE_DIR", self.root.join("state"))
-            .env("HEDGEHOG_NO_TRUFFLEHOG", "1")
             // The test binary is unsigned (or ad-hoc signed); without this
             // every scheduled command would refuse before doing anything.
             .env("GORSE_ALLOW_UNSIGNED_SCHEDULE", "1")
@@ -407,145 +406,6 @@ fn unreadable_credential_file_makes_the_run_incomplete_not_resolved() {
     assert_eq!(status["baseline"], baseline);
 }
 
-/// A finding from the optional TruffleHog engine is only resolved by a run
-/// in which the engine ran. Uninstalling it leaves the file unexamined: the
-/// finding is `unassessed`, the run is incomplete (exit 3, `ok: false`),
-/// the notification says engine coverage was lost, and the run with the
-/// engine stays the baseline.
-#[cfg(unix)]
-#[test]
-fn removing_the_engine_leaves_its_findings_unassessed_not_resolved() {
-    use std::os::unix::fs::PermissionsExt;
-    let home = TestHome::new();
-    let cache = home.root.join("home/.azure/msal_token_cache.json");
-    fs::create_dir_all(cache.parent().unwrap()).unwrap();
-    fs::write(&cache, "{\"AccessToken\": {}}\n").unwrap();
-    let tools = home.root.join("tools");
-    fs::create_dir_all(&tools).unwrap();
-    let engine = tools.join("trufflehog");
-    let script = format!(
-        "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo 'trufflehog 9.9.9'; exit 0; fi\necho '{{\"SourceMetadata\":{{\"Data\":{{\"Filesystem\":{{\"file\":\"{}\",\"line\":1}}}}}},\"DetectorName\":\"JWT\",\"Verified\":false,\"Raw\":\"RAWJWTVALUE\",\"Redacted\":\"eyJ****\"}}'\n",
-        cache.display()
-    );
-    fs::write(&engine, script).unwrap();
-    fs::set_permissions(&engine, fs::Permissions::from_mode(0o755)).unwrap();
-    let run_with = |extra: &[&str]| {
-        let output = home
-            .command()
-            .env_remove("HEDGEHOG_NO_TRUFFLEHOG")
-            .env("GORSE_TRUFFLEHOG", &engine)
-            .args(["exposure", "--json", "--record"])
-            .args(extra)
-            .output()
-            .expect("run gorse");
-        let json: serde_json::Value = serde_json::from_slice(&output.stdout)
-            .unwrap_or_else(|e| panic!("invalid JSON: {e}; {output:?}"));
-        (output, json)
-    };
-    let run = || run_with(&[]);
-
-    let (output, first) = run();
-    assert_eq!(first["incomplete"], false, "{first}");
-    assert!(matches!(output.status.code(), Some(0 | 1)), "{output:?}");
-    let assessed: Vec<&str> = first["sources_assessed"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter_map(|s| s.as_str())
-        .collect();
-    assert!(assessed.contains(&"trufflehog"), "{first}");
-    assert!(assessed.contains(&"kubeconfig"), "{first}");
-    let engine_findings: Vec<_> = first["findings"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter(|f| f["source"] == "trufflehog")
-        .collect();
-    assert_eq!(engine_findings.len(), 1, "{first}");
-    assert_eq!(
-        engine_findings[0]["verification"]["status"],
-        "not_attempted"
-    );
-    assert!(!first.to_string().contains("RAWJWTVALUE"));
-    let history = home.exposure_dir().join("history");
-    let baseline = fs::read_dir(&history)
-        .unwrap()
-        .next()
-        .unwrap()
-        .unwrap()
-        .file_name()
-        .to_string_lossy()
-        .to_string();
-
-    // The engine is gone; the file it read is unchanged.
-    fs::remove_file(&engine).unwrap();
-    let html_path = home.root.join("report.html");
-    let (output, second) = run_with(&["--html", html_path.to_str().unwrap()]);
-    // The HTML is rendered from the same final report as the JSON: after
-    // the history comparison found the engine's coverage missing.
-    let html = fs::read_to_string(&html_path).unwrap();
-    assert!(html.contains("Incomplete:"), "no incomplete banner: {html}");
-    assert!(
-        html.contains(
-            "TruffleHog ran in the previous check and did not run in this one (not installed)"
-        ),
-        "{html}"
-    );
-    assert!(html.contains("Not assessed in this run (1)"), "{html}");
-    assert!(html.contains("~/.azure/msal_token_cache.json"), "{html}");
-    assert!(
-        html.contains("not assessed in this run: not installed"),
-        "{html}"
-    );
-    assert_eq!(output.status.code(), Some(3), "{output:?}");
-    assert_eq!(second["incomplete"], true, "{second}");
-    let changes = &second["changes"];
-    assert_eq!(changes["counts"]["resolved"], 0, "{second}");
-    assert_eq!(changes["counts"]["unassessed"], 1, "{second}");
-    assert_eq!(
-        changes["unassessed"][0]["location"],
-        "~/.azure/msal_token_cache.json"
-    );
-    assert_eq!(changes["unassessed"][0]["reason"], "not installed");
-    assert_eq!(changes["engine_coverage_lost"], true);
-    assert_eq!(changes["notify"], true);
-    let unavailable = second["sources_unavailable"].as_array().unwrap();
-    assert!(
-        unavailable
-            .iter()
-            .any(|u| u["source"] == "trufflehog" && u["reason"] == "not installed"),
-        "{second}"
-    );
-    let failures = second["coverage_failures"].as_array().unwrap();
-    assert!(
-        failures.iter().any(|f| f["reason"]
-            == "TruffleHog ran in the previous check and did not run in this one (not installed)"),
-        "{second}"
-    );
-
-    let status: serde_json::Value =
-        serde_json::from_str(&fs::read_to_string(home.exposure_dir().join("status.json")).unwrap())
-            .unwrap();
-    assert_eq!(status["ok"], false, "{status}");
-    assert_eq!(status["unassessed"], 1);
-    assert_eq!(status["resolved"], 0);
-    assert_eq!(status["baseline"], baseline, "the baseline is unchanged");
-    let recorded: Vec<_> = fs::read_dir(&history).unwrap().collect();
-    assert_eq!(recorded.len(), 2);
-
-    let text = String::from_utf8_lossy(&home.run(&["schedule", "status"]).stdout).to_string();
-    assert!(text.contains("1 unassessed"), "{text}");
-    let (_, json) = home.json(&["schedule", "history", "--json"]);
-    assert_eq!(json["runs"][0]["unassessed"], 1, "{json}");
-    assert_eq!(json["runs"][0]["incomplete"], true);
-
-    // A third run without the engine is compared with the same baseline:
-    // still unassessed, still never resolved.
-    let (_, third) = run();
-    assert_eq!(third["changes"]["counts"]["unassessed"], 1, "{third}");
-    assert_eq!(third["changes"]["counts"]["resolved"], 0);
-}
-
 /// The newest file in the history folder.
 fn newest_run(home: &TestHome) -> String {
     let mut names: Vec<String> = fs::read_dir(home.exposure_dir().join("history"))
@@ -699,100 +559,6 @@ fn removing_ssh_auth_sock_leaves_agent_identities_unassessed() {
     let (output, json2) = fresh.json(&["exposure", "--json", "--record"]);
     assert_eq!(output.status.code(), Some(0), "{output:?} {json} {json2}");
     assert_eq!(json2["incomplete"], false);
-}
-
-/// TruffleHog ran and found nothing; then it is gone. Nothing is
-/// unassessed, but the files only it reads were not examined: the run is
-/// incomplete (exit 3) and never becomes the baseline. A user who removed
-/// the engine on purpose accepts the new state with
-/// `gorse schedule accept-baseline`.
-#[cfg(unix)]
-#[test]
-fn losing_an_engine_that_found_nothing_is_incomplete_until_accepted() {
-    use std::os::unix::fs::PermissionsExt;
-    let home = TestHome::new();
-    let tools = home.root.join("tools");
-    fs::create_dir_all(&tools).unwrap();
-    let engine = tools.join("trufflehog");
-    fs::write(
-        &engine,
-        "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo 'trufflehog 9.9.9'; exit 0; fi\nexit 0\n",
-    )
-    .unwrap();
-    fs::set_permissions(&engine, fs::Permissions::from_mode(0o755)).unwrap();
-    // Something for the engine to be handed.
-    let cache = home.root.join("home/.azure/msal_token_cache.json");
-    fs::create_dir_all(cache.parent().unwrap()).unwrap();
-    fs::write(&cache, "{\"AccessToken\": {}}\n").unwrap();
-    let run = || {
-        let output = home
-            .command()
-            .env_remove("HEDGEHOG_NO_TRUFFLEHOG")
-            .env("GORSE_TRUFFLEHOG", &engine)
-            .args(["exposure", "--json", "--record"])
-            .output()
-            .expect("run gorse");
-        let json: serde_json::Value = serde_json::from_slice(&output.stdout)
-            .unwrap_or_else(|e| panic!("invalid JSON: {e}; {output:?}"));
-        (output, json)
-    };
-    let (output, first) = run();
-    assert_eq!(output.status.code(), Some(0), "{output:?} {first}");
-    assert!(first["sources_assessed"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|s| s == "trufflehog"));
-    let baseline = newest_run(&home);
-
-    fs::remove_file(&engine).unwrap();
-    let (output, second) = run();
-    assert_eq!(output.status.code(), Some(3), "{output:?}");
-    assert_eq!(second["incomplete"], true, "{second}");
-    assert_eq!(second["changes"]["counts"]["unassessed"], 0);
-    assert!(second["coverage_failures"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|f| f["reason"]
-            == "TruffleHog ran in the previous check and did not run in this one (not installed)"));
-    assert_eq!(status(&home)["baseline"], baseline);
-    let lost = newest_run(&home);
-
-    // Still lost on the next run: compared with the same baseline.
-    let (output, _) = run();
-    assert_eq!(output.status.code(), Some(3), "{output:?}");
-    assert_eq!(status(&home)["baseline"], baseline);
-    let latest = newest_run(&home);
-    assert_ne!(latest, lost);
-
-    // The user accepts the run without the engine.
-    let (output, json) = home.json(&["schedule", "accept-baseline", "--json"]);
-    assert!(output.status.success(), "{output:?}");
-    assert_eq!(json["baseline"], latest.as_str());
-    assert_eq!(json["accepted_by_user"], true);
-    let stored: serde_json::Value = serde_json::from_str(
-        &fs::read_to_string(home.exposure_dir().join("history").join(&latest)).unwrap(),
-    )
-    .unwrap();
-    assert!(
-        stored.get("accepted_by_user").is_none(),
-        "the run file is never modified"
-    );
-    let accepted: serde_json::Value = serde_json::from_str(
-        &fs::read_to_string(home.exposure_dir().join("baseline.json")).unwrap(),
-    )
-    .unwrap();
-    assert_eq!(accepted["file"], latest.as_str());
-    assert_eq!(accepted["accepted_by_user"], true);
-    let (output, fourth) = run();
-    assert_eq!(output.status.code(), Some(0), "{output:?} {fourth}");
-    assert_eq!(fourth["incomplete"], false, "{fourth}");
-    assert_eq!(status(&home)["baseline"], latest.as_str());
-
-    let output = home.run(&["schedule", "accept-baseline"]);
-    assert!(output.status.success(), "{output:?}");
-    assert!(String::from_utf8_lossy(&output.stdout).contains("as the baseline"));
 }
 
 /// The checksum recipe exactly as docs/EXPOSURE_CHECK.md and the report's

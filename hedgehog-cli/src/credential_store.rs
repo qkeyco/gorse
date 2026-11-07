@@ -244,7 +244,7 @@ pub fn require_runtime_support() -> Result<(), String> {
     if cfg!(target_os = "macos") {
         Ok(())
     } else {
-        Err("Paid runtime activation and renewal are currently qualified only on macOS. Existing free security features remain available.".into())
+        Err("Gorse Pro runs on macOS for now; Windows and Linux are coming. The free exposure check and Deep Scan work in full here. A Pro key works on a Mac, or ask support@gorse.is for a refund.".into())
     }
 }
 

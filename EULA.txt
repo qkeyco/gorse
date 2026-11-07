@@ -81,12 +81,6 @@ they differ about purchases, accounts or refunds, the Terms of Service apply.
    licence conflicts with this agreement, it governs for that component
    only. Nothing in those licences grants any right to the Software itself.
 
-   The optional TruffleHog engine is a separate program published by Truffle
-   Security Co. under the GNU Affero General Public License v3. The Software
-   downloads it from its publisher's releases only when you ask, runs it as
-   a separate process and stores its licence text beside it. It is not part
-   of the Software and is not covered by this agreement.
-
 
 6. DATA
 

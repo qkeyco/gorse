@@ -78,10 +78,7 @@ impl Report {
     /// Incomplete by the CLI's flag, a coverage failure, or earlier
     /// findings that could not be reassessed: never shown as all clear.
     fn is_incomplete(&self) -> bool {
-        self.incomplete
-            || !self.coverage_failures.is_empty()
-            || self.unassessed_count() > 0
-            || self.changes.engine_coverage_lost
+        self.incomplete || !self.coverage_failures.is_empty() || self.unassessed_count() > 0
     }
 }
 
@@ -90,7 +87,6 @@ impl Report {
 struct Changes {
     unassessed: Vec<ChangeEntry>,
     unassessed_count: u64,
-    engine_coverage_lost: bool,
 }
 
 /// A finding an earlier recorded run made whose source this run could not
@@ -155,10 +151,6 @@ impl Changes {
                 .and_then(|c| c.get("unassessed"))
                 .and_then(|n| n.as_u64())
                 .unwrap_or(0),
-            engine_coverage_lost: v
-                .get("engine_coverage_lost")
-                .and_then(|b| b.as_bool())
-                .unwrap_or(false),
         }
     }
 }
@@ -685,92 +677,6 @@ fn update_notice_of(v: &serde_json::Value) -> Option<UpdateNotice> {
 const DOWNLOAD_URL: &str = "https://www.gorse.is/download";
 const SECURITY_URL: &str = "https://www.gorse.is/trust";
 
-// Optional engines, via the CLI: status, and a one-click TruffleHog install
-// with download progress streamed on stderr.
-#[derive(Clone, Default)]
-struct EngineState {
-    installed: bool,
-    managed: bool,
-    version: Option<String>,
-    download_mb: u64,
-}
-
-fn engine_status() -> EngineState {
-    let Ok(out) = run_cli(&["engines", "status", "--json"], None) else {
-        return EngineState {
-            download_mb: 75,
-            ..Default::default()
-        };
-    };
-    let v: serde_json::Value = serde_json::from_slice(&out).unwrap_or_default();
-    let t = &v["trufflehog"];
-    EngineState {
-        installed: t["installed"].as_bool().unwrap_or(false),
-        managed: t["managed"].as_bool().unwrap_or(false),
-        version: t["version"].as_str().map(|s| s.to_string()),
-        download_mb: t["download_mb"].as_u64().unwrap_or(75),
-    }
-}
-
-#[derive(Clone, Default)]
-struct DownloadProgress {
-    received: u64,
-    total: Option<u64>,
-}
-
-type SharedDownload = std::sync::Arc<std::sync::Mutex<DownloadProgress>>;
-
-fn install_trufflehog(progress: SharedDownload) -> Result<(), String> {
-    use std::io::{BufRead, Read};
-    let cli = cli_path().ok_or("The checker is missing.")?;
-    let mut cmd = Command::new(&cli);
-    cmd.args(["engines", "install", "trufflehog", "--json", "--progress"])
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped());
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        cmd.creation_flags(0x0800_0000);
-    }
-    let mut child = cmd
-        .spawn()
-        .map_err(|e| format!("Could not start the checker: {e}"))?;
-    let stderr = child.stderr.take().ok_or("no stderr")?;
-    let mut stdout = child.stdout.take().ok_or("no stdout")?;
-    let p = progress.clone();
-    let reader = std::thread::spawn(move || {
-        for line in std::io::BufReader::new(stderr)
-            .lines()
-            .map_while(Result::ok)
-        {
-            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) {
-                if v.get("event").and_then(|e| e.as_str()) == Some("download") {
-                    let mut g = p.lock().unwrap();
-                    g.received = v
-                        .get("received")
-                        .and_then(|x| x.as_u64())
-                        .unwrap_or(g.received);
-                    g.total = v.get("total").and_then(|x| x.as_u64());
-                }
-            }
-        }
-    });
-    let mut out = Vec::new();
-    stdout.read_to_end(&mut out).map_err(|e| e.to_string())?;
-    let status = child.wait().map_err(|e| e.to_string())?;
-    let _ = reader.join();
-    if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&out) {
-        if let Some(e) = v.get("error").and_then(|e| e.as_str()) {
-            return Err(e.to_string());
-        }
-    }
-    if !status.success() {
-        return Err("TruffleHog could not be installed.".into());
-    }
-    Ok(())
-}
-
 fn open_url(url: &str) {
     #[cfg(windows)]
     let _ = Command::new("cmd").args(["/C", "start", "", url]).spawn();
@@ -1053,11 +959,6 @@ enum Mode {
 }
 
 struct App {
-    engine: EngineState,
-    engine_rx: Option<Receiver<EngineState>>,
-    install_rx: Option<Receiver<Result<(), String>>>,
-    install_progress: SharedDownload,
-    install_error: Option<String>,
     update_rx: Option<Receiver<Option<UpdateNotice>>>,
     newer: Option<UpdateNotice>,
     update_dismissed: bool,
@@ -1091,14 +992,6 @@ struct App {
 impl App {
     fn new() -> Self {
         let mut app = Self {
-            engine: EngineState {
-                download_mb: 75,
-                ..Default::default()
-            },
-            engine_rx: None,
-            install_rx: None,
-            install_progress: SharedDownload::default(),
-            install_error: None,
             update_rx: None,
             newer: None,
             update_dismissed: false,
@@ -1128,39 +1021,6 @@ impl App {
         app
     }
 
-    fn refresh_engines(&mut self) {
-        let (tx, rx) = channel();
-        std::thread::spawn(move || {
-            let _ = tx.send(engine_status());
-        });
-        self.engine_rx = Some(rx);
-    }
-
-    /// One-click TruffleHog: the CLI downloads, checks and installs it.
-    fn start_trufflehog_install(&mut self) {
-        if self.install_rx.is_some() {
-            return;
-        }
-        self.install_error = None;
-        *self.install_progress.lock().unwrap() = DownloadProgress::default();
-        let progress = self.install_progress.clone();
-        let (tx, rx) = channel();
-        std::thread::spawn(move || {
-            let _ = tx.send(install_trufflehog(progress));
-        });
-        self.install_rx = Some(rx);
-    }
-
-    /// Removes the copy of TruffleHog Gorse installed, then re-reads the status.
-    fn remove_trufflehog(&mut self) {
-        let (tx, rx) = channel();
-        std::thread::spawn(move || {
-            let _ = run_cli(&["engines", "remove", "trufflehog", "--json"], None);
-            let _ = tx.send(engine_status());
-        });
-        self.engine_rx = Some(rx);
-    }
-
     fn refresh_license(&mut self) {
         let (tx, rx) = channel();
         std::thread::spawn(move || {
@@ -1185,7 +1045,6 @@ impl App {
                 let _ = tx.send(update_notice());
             });
             self.update_rx = Some(rx);
-            self.refresh_engines();
         }
         self.error = None;
         self.verify_refused = None;
@@ -1221,30 +1080,6 @@ impl App {
     }
 
     fn poll(&mut self, ctx: &egui::Context) {
-        if let Some(rx) = &self.engine_rx {
-            match rx.try_recv() {
-                Ok(state) => {
-                    self.engine = state;
-                    self.engine_rx = None;
-                }
-                Err(std::sync::mpsc::TryRecvError::Disconnected) => self.engine_rx = None,
-                Err(_) => ctx.request_repaint_after(Duration::from_millis(500)),
-            }
-        }
-        if let Some(rx) = &self.install_rx {
-            match rx.try_recv() {
-                Ok(Ok(())) => {
-                    self.install_rx = None;
-                    self.refresh_engines();
-                }
-                Ok(Err(message)) => {
-                    self.install_rx = None;
-                    self.install_error = Some(message);
-                }
-                Err(std::sync::mpsc::TryRecvError::Disconnected) => self.install_rx = None,
-                Err(_) => ctx.request_repaint_after(Duration::from_millis(250)),
-            }
-        }
         if let Some(rx) = &self.update_rx {
             match rx.try_recv() {
                 Ok(newer) => {
@@ -2145,12 +1980,9 @@ fn incomplete_lines(report: &Report) -> (String, Vec<String>) {
     } else if n == 0 {
         lines.push("Some credential locations could not be read.".into());
     }
-    // Sources that did not run, other than an optional engine that simply
-    // is not installed or was switched off (those are not gaps by
-    // themselves; a lost engine shows up as a coverage failure above).
+    // Sources that did not run, unless the reason is already listed above.
     for u in &report.sources_unavailable {
-        let ordinary = u.reason == "not installed" || u.reason.starts_with("switched off");
-        if !ordinary && !lines.iter().any(|l| l.contains(&u.reason)) {
+        if !lines.iter().any(|l| l.contains(&u.reason)) {
             lines.push(format!("Not assessed: {} ({})", u.source, u.reason));
         }
     }
@@ -2362,7 +2194,7 @@ mod tests {
             }],
             "incomplete": false, "coverage_failures": [],
             "sources_assessed": ["aws-credentials-file"],
-            "sources_unavailable": [{"source": "trufflehog", "reason": "not installed"}],
+            "sources_unavailable": [{"source": "ssh-agent", "reason": "SSH_AUTH_SOCK is not set"}],
         }))
         .unwrap();
         let counts = VerificationCounts::of(&report);
@@ -2375,7 +2207,7 @@ mod tests {
             report.findings[0].verification.as_ref().unwrap().status,
             "failed"
         );
-        assert_eq!(report.sources_unavailable[0].source, "trufflehog");
+        assert_eq!(report.sources_unavailable[0].source, "ssh-agent");
 
         // Without the summary counts, counted from the findings.
         let mut older = report.clone();
@@ -2452,10 +2284,9 @@ mod tests {
             "incomplete": true,
             "changes": {
                 "counts": {"unassessed": 3, "new": 0},
-                "engine_coverage_lost": true,
                 "unassessed": [
                     {"kind": "github_token", "name": "GitHub token", "location": "/x/.env",
-                     "severity": "high", "reason": "TruffleHog is not installed"},
+                     "severity": "high", "reason": "/x/.env: Permission denied"},
                     {"kind": "aws_access_key", "name": "AWS key", "location": "/x/creds",
                      "severity": "critical", "reason": "could not interpret /x/creds"},
                     "not an entry"
@@ -2483,7 +2314,7 @@ mod tests {
             lines[0]
         );
         assert!(
-            lines[1].contains("TruffleHog is not installed"),
+            lines[1].contains("/x/.env: Permission denied"),
             "{}",
             lines[1]
         );

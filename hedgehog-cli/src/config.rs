@@ -12,7 +12,7 @@ use std::ffi::OsString;
 use std::path::PathBuf;
 
 /// Prefixes for the user-facing environment overrides (`NO_UPDATE_CHECK`,
-/// `STATE_DIR`, `API_ORIGIN`, `NO_TRUFFLEHOG`, `TRUFFLEHOG*`). `GORSE_<name>`
+/// `STATE_DIR`, `API_ORIGIN`). `GORSE_<name>`
 /// is read first, then the older `HEDGEHOG_<name>`, so setups made before the
 /// product was renamed keep working.
 pub const ENV_PREFIXES: [&str; 2] = ["GORSE_", "HEDGEHOG_"];
